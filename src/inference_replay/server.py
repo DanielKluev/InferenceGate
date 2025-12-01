@@ -311,7 +311,6 @@ async def _replay_from_cache(entry: CacheEntry) -> StreamingResponse | JSONRespo
     response = entry.response
 
     if response.is_streaming and response.chunks:
-
         async def replay_chunks() -> AsyncGenerator[bytes, None]:
             for chunk in response.chunks:
                 yield chunk.encode("utf-8")
