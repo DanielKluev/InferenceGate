@@ -1,16 +1,11 @@
-"""Tests for InferenceReplay storage module."""
+"""Tests for InferenceGate recording/storage module."""
 
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from inference_replay.storage import (
-    CachedRequest,
-    CachedResponse,
-    CacheEntry,
-    CacheStorage,
-)
+from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
 
 @pytest.fixture
@@ -30,13 +25,13 @@ class TestCacheStorage:
     """Tests for CacheStorage class."""
 
     def test_init_creates_directory(self, temp_cache_dir):
-        """Test that init creates the cache directory."""
+        """Test that CacheStorage constructor creates the cache directory if it doesn't exist."""
         cache_dir = Path(temp_cache_dir) / "new_cache"
         CacheStorage(cache_dir)  # Side-effect: creates directory
         assert cache_dir.exists()
 
     def test_put_and_get(self, storage):
-        """Test storing and retrieving a cache entry."""
+        """Test that storing an entry and retrieving it returns the same data."""
         request = CachedRequest(
             method="POST",
             path="/v1/chat/completions",
@@ -48,12 +43,7 @@ class TestCacheStorage:
             headers={"content-type": "application/json"},
             body={"choices": [{"message": {"content": "Hi there!"}}]},
         )
-        entry = CacheEntry(
-            request=request,
-            response=response,
-            model="gpt-4",
-            temperature=0.7,
-        )
+        entry = CacheEntry(request=request, response=response, model="gpt-4", temperature=0.7)
 
         cache_key = storage.put(entry)
         assert cache_key is not None
@@ -65,23 +55,14 @@ class TestCacheStorage:
         assert retrieved.response.body == response.body
 
     def test_get_nonexistent(self, storage):
-        """Test getting a non-existent entry."""
-        request = CachedRequest(
-            method="GET",
-            path="/v1/models",
-            headers={},
-        )
+        """Test that getting a non-existent entry returns None."""
+        request = CachedRequest(method="GET", path="/v1/models", headers={})
         result = storage.get(request)
         assert result is None
 
     def test_exists(self, storage):
-        """Test exists method."""
-        request = CachedRequest(
-            method="POST",
-            path="/v1/chat/completions",
-            headers={},
-            body={"model": "gpt-4"},
-        )
+        """Test that exists() correctly reports whether a request is cached."""
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4"})
 
         assert not storage.exists(request)
 
@@ -92,15 +73,10 @@ class TestCacheStorage:
         assert storage.exists(request)
 
     def test_clear(self, storage):
-        """Test clearing cache."""
+        """Test that clear() removes all entries and returns the correct count."""
         # Add some entries
         for i in range(3):
-            request = CachedRequest(
-                method="POST",
-                path="/v1/chat/completions",
-                headers={},
-                body={"model": f"model-{i}"},
-            )
+            request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": f"model-{i}"})
             response = CachedResponse(status_code=200, headers={}, body={})
             entry = CacheEntry(request=request, response=response)
             storage.put(entry)
@@ -110,15 +86,10 @@ class TestCacheStorage:
         assert storage.list_entries() == []
 
     def test_list_entries(self, storage):
-        """Test listing cache entries."""
+        """Test that list_entries() returns all stored entries."""
         # Add entries
         for i in range(2):
-            request = CachedRequest(
-                method="POST",
-                path=f"/v1/path-{i}",
-                headers={},
-                body={},
-            )
+            request = CachedRequest(method="POST", path=f"/v1/path-{i}", headers={}, body={})
             response = CachedResponse(status_code=200, headers={}, body={})
             entry = CacheEntry(request=request, response=response)
             storage.put(entry)
@@ -127,7 +98,7 @@ class TestCacheStorage:
         assert len(entries) == 2
 
     def test_compute_prompt_hash(self):
-        """Test prompt hash computation."""
+        """Test that prompt hash is deterministic and different for different inputs."""
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
@@ -136,20 +107,13 @@ class TestCacheStorage:
         hash2 = CacheStorage.compute_prompt_hash(messages)
         assert hash1 == hash2
 
-        different_messages = [
-            {"role": "user", "content": "Different"},
-        ]
+        different_messages = [{"role": "user", "content": "Different"}]
         hash3 = CacheStorage.compute_prompt_hash(different_messages)
         assert hash1 != hash3
 
     def test_streaming_response(self, storage):
-        """Test caching streaming responses."""
-        request = CachedRequest(
-            method="POST",
-            path="/v1/chat/completions",
-            headers={},
-            body={"model": "gpt-4", "stream": True},
-        )
+        """Test that streaming responses with chunks are stored and retrieved correctly."""
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "stream": True})
         response = CachedResponse(
             status_code=200,
             headers={},
