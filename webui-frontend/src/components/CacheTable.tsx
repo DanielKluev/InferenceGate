@@ -1,6 +1,10 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { CacheEntry } from '../api/client';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
 interface CacheTableProps {
   entries: CacheEntry[];
@@ -51,116 +55,103 @@ export default function CacheTable({ entries }: CacheTableProps) {
   };
 
   return (
-    <div className="bg-white shadow overflow-hidden sm:rounded-lg">
-      <div className="px-4 py-5 sm:px-6">
-        <input
+    <Card>
+      <CardHeader>
+        <Input
           type="text"
           placeholder="Search entries..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          className="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-gray-300 rounded-md px-3 py-2"
         />
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+      </CardHeader>
+      <CardContent className="p-0">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50"
                 onClick={() => handleSort('id')}
               >
                 ID {sortField === 'id' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50"
                 onClick={() => handleSort('model')}
               >
                 Model {sortField === 'model' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50"
                 onClick={() => handleSort('method')}
               >
                 Method {sortField === 'method' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50"
                 onClick={() => handleSort('path')}
               >
                 Path {sortField === 'path' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50"
                 onClick={() => handleSort('status_code')}
               >
                 Status {sortField === 'status_code' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-              >
+              </TableHead>
+              <TableHead>
                 Type
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {sortedEntries.map((entry) => (
-              <tr
+              <TableRow
                 key={entry.id}
-                className="hover:bg-gray-50 cursor-pointer"
+                className="cursor-pointer"
                 onClick={() => handleRowClick(entry.id)}
               >
-                <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">
+                <TableCell className="font-mono text-muted-foreground">
                   {entry.id.substring(0, 8)}...
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                </TableCell>
+                <TableCell>
                   {entry.model || '-'}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
+                </TableCell>
+                <TableCell>
+                  <Badge variant="secondary">
                     {entry.method}
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-muted-foreground">
                   {entry.path}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  <span
-                    className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      entry.status_code === 200
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-red-100 text-red-800'
-                    }`}
+                </TableCell>
+                <TableCell>
+                  <Badge
+                    variant={entry.status_code === 200 ? 'default' : 'destructive'}
                   >
                     {entry.status_code}
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  </Badge>
+                </TableCell>
+                <TableCell>
                   {entry.is_streaming ? (
-                    <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-purple-100 text-purple-800">
+                    <Badge variant="outline">
                       Streaming
-                    </span>
+                    </Badge>
                   ) : (
-                    <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                    <Badge variant="secondary">
                       Standard
-                    </span>
+                    </Badge>
                   )}
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
-      </div>
-      {sortedEntries.length === 0 && (
-        <div className="text-center py-12">
-          <p className="text-gray-500">No entries found.</p>
-        </div>
-      )}
-    </div>
+          </TableBody>
+        </Table>
+        {sortedEntries.length === 0 && (
+          <div className="text-center py-12">
+            <p className="text-muted-foreground">No entries found.</p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

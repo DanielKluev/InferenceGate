@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { getCacheStats, getConfig } from '../api/client';
 import type { CacheStats, Config } from '../api/client';
 import StatsCards from '../components/StatsCards';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 export default function Dashboard() {
   const [stats, setStats] = useState<CacheStats | null>(null);
@@ -29,16 +32,30 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="text-gray-500">Loading...</div>
+      <div className="px-4 sm:px-0">
+        <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i}>
+              <CardHeader className="pb-2">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-8 w-16" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-md p-4">
-        <p className="text-red-800">Error: {error}</p>
+      <div className="px-4 sm:px-0">
+        <Alert variant="destructive">
+          <AlertDescription>Error: {error}</AlertDescription>
+        </Alert>
       </div>
     );
   }
@@ -72,52 +89,60 @@ export default function Dashboard() {
 
   return (
     <div className="px-4 sm:px-0">
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">Dashboard</h2>
+      <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
       
       <StatsCards stats={statsCards} />
 
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="bg-white shadow rounded-lg p-6">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Configuration</h3>
-          <dl className="space-y-2">
-            <div className="flex justify-between">
-              <dt className="text-sm text-gray-500">Mode:</dt>
-              <dd className="text-sm font-medium text-gray-900">{config?.mode}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-sm text-gray-500">Proxy:</dt>
-              <dd className="text-sm font-medium text-gray-900">
-                {config?.host}:{config?.port}
-              </dd>
-            </div>
-            {config?.upstream_url && (
-              <div className="flex justify-between">
-                <dt className="text-sm text-gray-500">Upstream:</dt>
-                <dd className="text-sm font-medium text-gray-900">{config?.upstream_url}</dd>
-              </div>
-            )}
-            <div className="flex justify-between">
-              <dt className="text-sm text-gray-500">Cache Directory:</dt>
-              <dd className="text-sm font-medium text-gray-900 font-mono">{config?.cache_dir}</dd>
-            </div>
-          </dl>
-        </div>
-
-        <div className="bg-white shadow rounded-lg p-6">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Entries by Model</h3>
-          {stats && Object.keys(stats.entries_by_model).length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Configuration</CardTitle>
+          </CardHeader>
+          <CardContent>
             <dl className="space-y-2">
-              {Object.entries(stats.entries_by_model).map(([model, count]) => (
-                <div key={model} className="flex justify-between">
-                  <dt className="text-sm text-gray-500">{model}:</dt>
-                  <dd className="text-sm font-medium text-gray-900">{count}</dd>
+              <div className="flex justify-between">
+                <dt className="text-sm text-muted-foreground">Mode:</dt>
+                <dd className="text-sm font-medium">{config?.mode}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-sm text-muted-foreground">Proxy:</dt>
+                <dd className="text-sm font-medium">
+                  {config?.host}:{config?.port}
+                </dd>
+              </div>
+              {config?.upstream_url && (
+                <div className="flex justify-between">
+                  <dt className="text-sm text-muted-foreground">Upstream:</dt>
+                  <dd className="text-sm font-medium">{config?.upstream_url}</dd>
                 </div>
-              ))}
+              )}
+              <div className="flex justify-between">
+                <dt className="text-sm text-muted-foreground">Cache Directory:</dt>
+                <dd className="text-sm font-medium font-mono">{config?.cache_dir}</dd>
+              </div>
             </dl>
-          ) : (
-            <p className="text-sm text-gray-500">No entries yet</p>
-          )}
-        </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Entries by Model</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {stats && Object.keys(stats.entries_by_model).length > 0 ? (
+              <dl className="space-y-2">
+                {Object.entries(stats.entries_by_model).map(([model, count]) => (
+                  <div key={model} className="flex justify-between">
+                    <dt className="text-sm text-muted-foreground">{model}:</dt>
+                    <dd className="text-sm font-medium">{count}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <p className="text-sm text-muted-foreground">No entries yet</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

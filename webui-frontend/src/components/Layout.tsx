@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { Button } from '@/components/ui/button';
+import { Separator } from '@/components/ui/separator';
 
 interface LayoutProps {
   children: ReactNode;
@@ -13,40 +15,33 @@ export default function Layout({ children }: LayoutProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm">
+    <div className="min-h-screen bg-background">
+      <nav className="bg-card shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex">
               <div className="flex-shrink-0 flex items-center">
-                <h1 className="text-xl font-bold text-gray-900">InferenceGate Dashboard</h1>
+                <h1 className="text-xl font-bold text-foreground">InferenceGate Dashboard</h1>
               </div>
-              <div className="ml-6 flex space-x-8">
-                <Link
-                  to="/"
-                  className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium ${
-                    isActive('/') 
-                      ? 'border-blue-500 text-gray-900' 
-                      : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
-                  }`}
+              <div className="ml-6 flex space-x-2">
+                <Button
+                  asChild
+                  variant={isActive('/') ? 'default' : 'ghost'}
                 >
-                  Dashboard
-                </Link>
-                <Link
-                  to="/cache"
-                  className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium ${
-                    isActive('/cache') || location.pathname.startsWith('/cache/')
-                      ? 'border-blue-500 text-gray-900' 
-                      : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
-                  }`}
+                  <Link to="/">Dashboard</Link>
+                </Button>
+                <Button
+                  asChild
+                  variant={isActive('/cache') || location.pathname.startsWith('/cache/') ? 'default' : 'ghost'}
                 >
-                  Cache Entries
-                </Link>
+                  <Link to="/cache">Cache Entries</Link>
+                </Button>
               </div>
             </div>
           </div>
         </div>
       </nav>
+      <Separator />
       <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         {children}
       </main>

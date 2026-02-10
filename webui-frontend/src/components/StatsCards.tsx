@@ -1,3 +1,5 @@
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+
 interface StatCardProps {
   title: string;
   value: string | number;
@@ -8,15 +10,17 @@ export default function StatsCards({ stats }: { stats: StatCardProps[] }) {
   return (
     <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
       {stats.map((stat, index) => (
-        <div key={index} className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="px-4 py-5 sm:p-6">
-            <dt className="text-sm font-medium text-gray-500 truncate">{stat.title}</dt>
-            <dd className="mt-1 text-3xl font-semibold text-gray-900">{stat.value}</dd>
+        <Card key={index}>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">{stat.title}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-semibold">{stat.value}</div>
             {stat.subtitle && (
-              <dd className="mt-1 text-sm text-gray-500">{stat.subtitle}</dd>
+              <p className="text-sm text-muted-foreground mt-1">{stat.subtitle}</p>
             )}
-          </div>
-        </div>
+          </CardContent>
+        </Card>
       ))}
     </div>
   );
