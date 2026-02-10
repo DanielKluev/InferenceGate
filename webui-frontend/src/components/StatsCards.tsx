@@ -1,4 +1,4 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
 
 interface StatCardProps {
   title: string;
@@ -12,7 +12,7 @@ export default function StatsCards({ stats }: { stats: StatCardProps[] }) {
       {stats.map((stat, index) => (
         <Card key={index}>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">{stat.title}</CardTitle>
+            <div className="text-sm font-medium text-muted-foreground">{stat.title}</div>
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-semibold">{stat.value}</div>
