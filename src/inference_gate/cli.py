@@ -324,8 +324,7 @@ def _print_test_result(success: bool, response: str, ctx: click.Context) -> None
 @click.option("--prompt", default=None, help="Custom prompt to send")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
-def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None,
-              verbose: bool | None) -> None:
+def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None, verbose: bool | None) -> None:
     """
     Test a running InferenceGate instance.
 

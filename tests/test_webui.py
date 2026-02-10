@@ -20,27 +20,48 @@ def temp_cache_dir(tmp_path):
 def storage_with_entries(temp_cache_dir):
     """Create a CacheStorage instance with some test entries."""
     storage = CacheStorage(temp_cache_dir)
-    
+
     # Add a couple of test entries
     request1 = CachedRequest(
         method="POST",
         path="/v1/chat/completions",
         headers={"content-type": "application/json"},
-        body={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]},
+        body={
+            "model": "gpt-4",
+            "messages": [{
+                "role": "user",
+                "content": "Hello"
+            }]
+        },
     )
     response1 = CachedResponse(
         status_code=200,
         headers={"content-type": "application/json"},
-        body={"id": "chatcmpl-123", "choices": [{"message": {"role": "assistant", "content": "Hi!"}}]},
+        body={
+            "id": "chatcmpl-123",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hi!"
+                }
+            }]
+        },
     )
     entry1 = CacheEntry(request=request1, response=response1, model="gpt-4", temperature=0.7)
     storage.put(entry1)
-    
+
     request2 = CachedRequest(
         method="POST",
         path="/v1/chat/completions",
         headers={"content-type": "application/json"},
-        body={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Test"}], "stream": True},
+        body={
+            "model": "gpt-3.5-turbo",
+            "messages": [{
+                "role": "user",
+                "content": "Test"
+            }],
+            "stream": True
+        },
     )
     chunks = [
         'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
@@ -55,7 +76,7 @@ def storage_with_entries(temp_cache_dir):
     )
     entry2 = CacheEntry(request=request2, response=response2, model="gpt-3.5-turbo", temperature=1.0)
     storage.put(entry2)
-    
+
     return storage
 
 
@@ -92,7 +113,7 @@ class TestWebUIAPI:
         data = await resp.json()
         assert isinstance(data, list)
         assert len(data) == 2
-        
+
         # Check structure of returned entries
         entry = data[0]
         assert "id" in entry
@@ -107,11 +128,11 @@ class TestWebUIAPI:
         # Get the list first to get a valid ID
         entries = storage_with_entries.list_entries()
         entry_id = entries[0][0]
-        
+
         resp = await webui_client.get(f"/api/cache/{entry_id}")
         assert resp.status == 200
         data = await resp.json()
-        
+
         assert data["id"] == entry_id
         assert "request" in data
         assert "response" in data
@@ -131,12 +152,12 @@ class TestWebUIAPI:
         resp = await webui_client.get("/api/stats")
         assert resp.status == 200
         data = await resp.json()
-        
+
         assert "total_entries" in data
         assert "total_size_bytes" in data
         assert "streaming_responses" in data
         assert "entries_by_model" in data
-        
+
         assert data["total_entries"] == 2
         assert data["streaming_responses"] == 1
         assert "gpt-4" in data["entries_by_model"]
@@ -147,13 +168,13 @@ class TestWebUIAPI:
         resp = await webui_client.get("/api/config")
         assert resp.status == 200
         data = await resp.json()
-        
+
         assert "mode" in data
         assert "upstream_url" in data
         assert "host" in data
         assert "port" in data
         assert "cache_dir" in data
-        
+
         assert data["mode"] == "record-and-replay"
         assert data["upstream_url"] == "https://api.openai.com"
         assert data["host"] == "127.0.0.1"
@@ -168,7 +189,7 @@ class TestWebUIServer:
         await webui_server.start()
         assert webui_server._runner is not None
         assert webui_server._site is not None
-        
+
         await webui_server.stop()
         assert webui_server._runner is None
         assert webui_server._site is None
@@ -225,7 +246,7 @@ class TestWebUIEmptyCache:
         resp = await empty_webui_client.get("/api/stats")
         assert resp.status == 200
         data = await resp.json()
-        
+
         assert data["total_entries"] == 0
         assert data["total_size_bytes"] >= 0
         assert data["streaming_responses"] == 0

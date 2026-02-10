@@ -47,11 +47,11 @@ class WebUIServer:
         self.upstream_base_url = upstream_base_url
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
-        
+
         # API handler
         self.api = WebUIAPI(storage=storage, mode=mode, cache_dir=cache_dir, upstream_base_url=upstream_base_url, host=proxy_host,
-                           port=proxy_port)
-        
+                            port=proxy_port)
+
         # Runtime state
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -73,19 +73,19 @@ class WebUIServer:
         Returns the configured `web.Application`.
         """
         app = web.Application()
-        
+
         # API routes
         app.router.add_route("GET", "/api/cache", self.api.get_cache_list)
         app.router.add_route("GET", "/api/cache/{entry_id}", self.api.get_cache_entry)
         app.router.add_route("GET", "/api/stats", self.api.get_stats)
         app.router.add_route("GET", "/api/config", self.api.get_config)
-        
+
         # Static file serving
         static_dir = self._get_static_dir()
         if static_dir.exists():
             # Serve static assets
             app.router.add_static("/assets", static_dir / "assets", name="static_assets", show_index=False, follow_symlinks=True)
-            
+
             # Serve index.html for all non-API routes (SPA fallback)
             app.router.add_route("GET", "/", self._handle_index)
             app.router.add_route("GET", "/{path:.*}", self._handle_spa_fallback)
@@ -93,7 +93,7 @@ class WebUIServer:
             self.log.warning("Static directory does not exist: %s", static_dir)
             # Add a fallback route that returns a message
             app.router.add_route("GET", "/{path:.*}", self._handle_no_static)
-        
+
         return app
 
     async def _handle_index(self, request: web.Request) -> web.Response:
@@ -104,7 +104,7 @@ class WebUIServer:
         """
         static_dir = self._get_static_dir()
         index_path = static_dir / "index.html"
-        
+
         if index_path.exists():
             return web.FileResponse(index_path)
         else:
@@ -117,11 +117,11 @@ class WebUIServer:
         This allows React Router to handle client-side routing.
         """
         path = request.match_info.get("path", "")
-        
+
         # Don't fallback for API routes or asset routes
         if path.startswith("api/") or path.startswith("assets/"):
             raise web.HTTPNotFound()
-        
+
         # Serve index.html for SPA routing
         return await self._handle_index(request)
 

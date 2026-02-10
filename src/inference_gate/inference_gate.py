@@ -25,9 +25,9 @@ class InferenceGate:
     and CacheStorage. Handles startup and shutdown lifecycle.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY,
-                 cache_dir: str = ".inference_cache", upstream_base_url: str = "https://api.openai.com", api_key: str | None = None,
-                 web_ui: bool = False, web_ui_port: int = 8081) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
+                 upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
+                 web_ui_port: int = 8081) -> None:
         """
         Initialize InferenceGate with configuration.
 
@@ -77,8 +77,8 @@ class InferenceGate:
         if self.web_ui:
             from inference_gate.webui.server import WebUIServer
             self._webui_server = WebUIServer(host=self.host, port=self.web_ui_port, storage=self._storage, mode=self.mode,
-                                            cache_dir=self.cache_dir, upstream_base_url=self.upstream_base_url, proxy_host=self.host,
-                                            proxy_port=self.port)
+                                             cache_dir=self.cache_dir, upstream_base_url=self.upstream_base_url, proxy_host=self.host,
+                                             proxy_port=self.port)
 
     async def start(self) -> None:
         """

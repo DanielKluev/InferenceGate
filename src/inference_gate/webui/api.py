@@ -122,33 +122,33 @@ class WebUIAPI:
         try:
             entries = self.storage.list_entries()
             total_entries = len(entries)
-            
+
             # Calculate statistics
             models: dict[str, int] = {}
             streaming_count = 0
             total_size = 0
-            
+
             for cache_key, entry in entries:
                 # Count by model
                 if entry.model:
                     models[entry.model] = models.get(entry.model, 0) + 1
-                
+
                 # Count streaming responses
                 if entry.response.is_streaming:
                     streaming_count += 1
-            
+
             # Calculate total cache directory size
             cache_path = Path(self.cache_dir)
             if cache_path.exists():
                 total_size = sum(f.stat().st_size for f in cache_path.glob("*.json"))
-            
+
             result = {
                 "total_entries": total_entries,
                 "total_size_bytes": total_size,
                 "streaming_responses": streaming_count,
                 "entries_by_model": models,
             }
-            
+
             self.log.debug("Returning cache stats: %d entries", total_entries)
             return web.json_response(result)
         except Exception as e:
