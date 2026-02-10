@@ -12,6 +12,7 @@ pip install inference-gate
 
 - **Record-and-Replay Mode**: Record new requests to cache, replay from cache when available
 - **Replay-Only Mode**: Only serve cached responses (for unit tests and CI)
+- **Web UI Dashboard**: Optional web-based dashboard for browsing cache entries, viewing statistics, and inspecting request/response details
 - Supports OpenAI Chat Completions API and Responses API
 - Supports streaming responses
 - Preserves prompt, temperature, model, and other metadata
@@ -83,6 +84,8 @@ inference-gate start [OPTIONS]
 | `--cache-dir, -c` | Cache directory | .inference_cache |
 | `--upstream, -u` | Upstream API URL | https://api.openai.com |
 | `--api-key, -k` | OpenAI API key | $OPENAI_API_KEY |
+| `--web-ui` | Enable web UI dashboard | false |
+| `--web-ui-port` | Web UI server port | 8081 |
 | `--verbose, -v` | Enable verbose logging | false |
 
 #### `replay` - Replay-Only Mode
@@ -100,6 +103,8 @@ inference-gate replay [OPTIONS]
 | `--port, -p` | Server port | 8080 |
 | `--host, -h` | Server host | 127.0.0.1 |
 | `--cache-dir, -c` | Cache directory | .inference_cache |
+| `--web-ui` | Enable web UI dashboard | false |
+| `--web-ui-port` | Web UI server port | 8081 |
 | `--verbose, -v` | Enable verbose logging | false |
 
 ### Test Commands
@@ -159,6 +164,65 @@ inference-gate cache info [--cache-dir PATH]
 ```bash
 inference-gate cache clear [--cache-dir PATH] [--yes]
 ```
+
+## Web UI Dashboard
+
+InferenceGate includes an optional web-based dashboard for browsing cached inference entries, viewing statistics, and inspecting request/response details.
+
+### Enabling the Web UI
+
+Add the `--web-ui` flag when starting InferenceGate:
+
+```bash
+# Record-and-replay mode with web UI
+inference-gate start --api-key $OPENAI_API_KEY --web-ui
+
+# Replay-only mode with web UI
+inference-gate replay --web-ui
+```
+
+The web UI will be available at `http://localhost:8081` by default. You can customize the port with `--web-ui-port`:
+
+```bash
+inference-gate start --web-ui --web-ui-port 3000
+```
+
+### Features
+
+- **Dashboard**: View cache statistics, current mode, and configuration at a glance
+- **Cache List**: Browse all cached entries in a sortable, filterable table
+- **Entry Details**: Inspect full request and response details including headers, body, and metadata
+- **Search**: Filter cache entries by ID, model, path, or method
+- **Streaming Support**: View streaming response chunks for SSE endpoints
+
+### Screenshots
+
+**Dashboard Page**
+
+![Dashboard](https://github.com/user-attachments/assets/6ec5916c-6e0e-40a7-a9e8-1289af7ed2e8)
+
+**Cache List Page**
+
+![Cache List](https://github.com/user-attachments/assets/01fe025c-7922-4f64-bf20-b2ea6158060e)
+
+**Entry Detail Page**
+
+![Entry Detail](https://github.com/user-attachments/assets/3a858019-b978-4893-9c04-ceb466dea67c)
+
+### Building the Frontend (Development Only)
+
+The web UI frontend is pre-built and included in the package. You only need to build it if you're developing or modifying the frontend:
+
+```bash
+cd webui-frontend
+npm install
+npm run build
+# Output goes to src/inference_gate/webui/static/
+```
+
+**Requirements:**
+- Node.js 16+ and npm (only for frontend development)
+- No runtime dependencies - the built static files are served by the Python backend
 
 ### Configuration Management
 
