@@ -9,7 +9,6 @@ Provides JSON API endpoints for:
 """
 
 import logging
-import os
 from pathlib import Path
 
 from aiohttp import web
@@ -66,8 +65,8 @@ class WebUIAPI:
             self.log.debug("Returning %d cache entries", len(result))
             return web.json_response(result)
         except Exception as e:
-            self.log.error("Error listing cache entries: %s", e)
-            return web.json_response({"error": str(e)}, status=500)
+            self.log.error("Error listing cache entries: %s", e, exc_info=True)
+            return web.json_response({"error": "Failed to list cache entries"}, status=500)
 
     async def get_cache_entry(self, request: web.Request) -> web.Response:
         """
@@ -80,38 +79,44 @@ class WebUIAPI:
             return web.json_response({"error": "Missing entry_id"}, status=400)
 
         try:
-            # Find the entry by cache key
-            entries = self.storage.list_entries()
-            for cache_key, entry in entries:
-                if cache_key == entry_id:
-                    result = {
-                        "id": cache_key,
-                        "model": entry.model,
-                        "temperature": entry.temperature,
-                        "prompt_hash": entry.prompt_hash,
-                        "request": {
-                            "method": entry.request.method,
-                            "path": entry.request.path,
-                            "headers": entry.request.headers,
-                            "body": entry.request.body,
-                            "query_params": entry.request.query_params,
-                        },
-                        "response": {
-                            "status_code": entry.response.status_code,
-                            "headers": entry.response.headers,
-                            "body": entry.response.body,
-                            "chunks": entry.response.chunks,
-                            "is_streaming": entry.response.is_streaming,
-                        }
-                    }
-                    self.log.debug("Returning cache entry: %s", entry_id)
-                    return web.json_response(result)
+            # Load the cache entry directly by key instead of scanning all files
+            cache_file = self.storage._get_cache_file(entry_id)
+            if not cache_file.exists():
+                return web.json_response({"error": "Entry not found"}, status=404)
 
-            # Entry not found
-            return web.json_response({"error": "Entry not found"}, status=404)
+            # Read and parse the cache entry
+            with open(cache_file, encoding="utf-8") as f:
+                import json
+                data = json.load(f)
+
+            from inference_gate.recording.storage import CacheEntry
+            entry = CacheEntry.model_validate(data)
+
+            result = {
+                "id": entry_id,
+                "model": entry.model,
+                "temperature": entry.temperature,
+                "prompt_hash": entry.prompt_hash,
+                "request": {
+                    "method": entry.request.method,
+                    "path": entry.request.path,
+                    "headers": entry.request.headers,
+                    "body": entry.request.body,
+                    "query_params": entry.request.query_params,
+                },
+                "response": {
+                    "status_code": entry.response.status_code,
+                    "headers": entry.response.headers,
+                    "body": entry.response.body,
+                    "chunks": entry.response.chunks,
+                    "is_streaming": entry.response.is_streaming,
+                }
+            }
+            self.log.debug("Returning cache entry: %s", entry_id)
+            return web.json_response(result)
         except Exception as e:
-            self.log.error("Error getting cache entry %s: %s", entry_id, e)
-            return web.json_response({"error": str(e)}, status=500)
+            self.log.error("Error getting cache entry %s: %s", entry_id, e, exc_info=True)
+            return web.json_response({"error": "Failed to get cache entry"}, status=500)
 
     async def get_stats(self, request: web.Request) -> web.Response:
         """
@@ -152,8 +157,8 @@ class WebUIAPI:
             self.log.debug("Returning cache stats: %d entries", total_entries)
             return web.json_response(result)
         except Exception as e:
-            self.log.error("Error getting cache stats: %s", e)
-            return web.json_response({"error": str(e)}, status=500)
+            self.log.error("Error getting cache stats: %s", e, exc_info=True)
+            return web.json_response({"error": "Failed to get cache statistics"}, status=500)
 
     async def get_config(self, request: web.Request) -> web.Response:
         """
@@ -172,5 +177,5 @@ class WebUIAPI:
             self.log.debug("Returning config")
             return web.json_response(result)
         except Exception as e:
-            self.log.error("Error getting config: %s", e)
-            return web.json_response({"error": str(e)}, status=500)
+            self.log.error("Error getting config: %s", e, exc_info=True)
+            return web.json_response({"error": "Failed to get configuration"}, status=500)

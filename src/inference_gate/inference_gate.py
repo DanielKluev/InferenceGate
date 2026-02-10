@@ -76,8 +76,12 @@ class InferenceGate:
         # WebUIServer is optional
         if self.web_ui:
             from inference_gate.webui.server import WebUIServer
-            self._webui_server = WebUIServer(host=self.host, port=self.web_ui_port, storage=self._storage, mode=self.mode,
-                                             cache_dir=self.cache_dir, upstream_base_url=self.upstream_base_url, proxy_host=self.host,
+            # Only expose a non-None upstream_base_url to the WebUI when we actually have upstream access enabled.
+            webui_upstream_base_url = self.upstream_base_url if self.mode == Mode.RECORD_AND_REPLAY else None
+            # For security, always bind WebUI to localhost unless user explicitly configures a different host
+            webui_host = "127.0.0.1"
+            self._webui_server = WebUIServer(host=webui_host, port=self.web_ui_port, storage=self._storage, mode=self.mode,
+                                             cache_dir=self.cache_dir, upstream_base_url=webui_upstream_base_url, proxy_host=self.host,
                                              proxy_port=self.port)
 
     async def start(self) -> None:
@@ -104,7 +108,7 @@ class InferenceGate:
 
         self.log.info("InferenceGate ready on http://%s:%d", self.host, self.port)
         if self._webui_server is not None:
-            self.log.info("WebUI dashboard available at http://%s:%d", self.host, self.web_ui_port)
+            self.log.info("WebUI dashboard available at http://127.0.0.1:%d", self.web_ui_port)
 
     async def stop(self) -> None:
         """

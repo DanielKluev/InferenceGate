@@ -122,7 +122,7 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     click.echo(f"  Upstream: {actual_upstream}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
     if web_ui:
-        click.echo(f"  WebUI: http://{actual_host}:{web_ui_port}")
+        click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
     asyncio.run(gate.run_forever())
 
@@ -162,7 +162,7 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
     if web_ui:
-        click.echo(f"  WebUI: http://{actual_host}:{web_ui_port}")
+        click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
     asyncio.run(gate.run_forever())
 

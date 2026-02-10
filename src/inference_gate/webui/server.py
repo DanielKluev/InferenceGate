@@ -82,19 +82,44 @@ class WebUIServer:
 
         # Static file serving
         static_dir = self._get_static_dir()
-        if static_dir.exists():
-            # Serve static assets
-            app.router.add_static("/assets", static_dir / "assets", name="static_assets", show_index=False, follow_symlinks=True)
+        assets_dir = static_dir / "assets"
+        index_path = static_dir / "index.html"
+
+        if static_dir.exists() and assets_dir.is_dir() and index_path.is_file():
+            # Serve static assets (without following symlinks to avoid exposing files outside the static directory)
+            app.router.add_static("/assets", assets_dir, name="static_assets", show_index=False)
+
+            # Serve root-level public files (vite.svg, etc.)
+            for public_file in static_dir.glob("*.svg"):
+                file_name = public_file.name
+                app.router.add_route("GET", f"/{file_name}", self._create_static_file_handler(public_file))
 
             # Serve index.html for all non-API routes (SPA fallback)
             app.router.add_route("GET", "/", self._handle_index)
             app.router.add_route("GET", "/{path:.*}", self._handle_spa_fallback)
         else:
-            self.log.warning("Static directory does not exist: %s", static_dir)
+            self.log.warning(
+                "Static frontend not fully available (static_dir=%s, assets_dir=%s, index_html=%s)",
+                static_dir,
+                assets_dir,
+                index_path,
+            )
             # Add a fallback route that returns a message
             app.router.add_route("GET", "/{path:.*}", self._handle_no_static)
 
         return app
+
+    def _create_static_file_handler(self, file_path: Path):
+        """
+        Create a handler function for serving a static file.
+
+        Returns a coroutine that serves the file when called.
+        """
+
+        async def handler(request: web.Request) -> web.Response:
+            return web.FileResponse(file_path)
+
+        return handler
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         """

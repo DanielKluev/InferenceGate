@@ -12,7 +12,11 @@ export default function EntryDetail() {
 
   useEffect(() => {
     async function fetchEntry() {
-      if (!id) return;
+      if (!id) {
+        setError('No entry ID provided');
+        setLoading(false);
+        return;
+      }
       try {
         const data = await getCacheEntry(id);
         setEntry(data);
