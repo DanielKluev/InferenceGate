@@ -1,6 +1,11 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { CacheEntry } from '../api/client';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Search } from 'lucide-react';
 
 interface CacheTableProps {
   entries: CacheEntry[];
@@ -51,116 +56,149 @@ export default function CacheTable({ entries }: CacheTableProps) {
   };
 
   return (
-    <div className="bg-white shadow overflow-hidden sm:rounded-lg">
-      <div className="px-4 py-5 sm:px-6">
-        <input
-          type="text"
-          placeholder="Search entries..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-gray-300 rounded-md px-3 py-2"
-        />
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('id')}
-              >
-                ID {sortField === 'id' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('model')}
-              >
-                Model {sortField === 'model' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('method')}
-              >
-                Method {sortField === 'method' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('path')}
-              >
-                Path {sortField === 'path' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('status_code')}
-              >
-                Status {sortField === 'status_code' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th
-                scope="col"
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-              >
-                Type
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {sortedEntries.map((entry) => (
-              <tr
-                key={entry.id}
-                className="hover:bg-gray-50 cursor-pointer"
-                onClick={() => handleRowClick(entry.id)}
-              >
-                <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">
-                  {entry.id.substring(0, 8)}...
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {entry.model || '-'}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
-                    {entry.method}
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                  {entry.path}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  <span
-                    className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      entry.status_code === 200
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-red-100 text-red-800'
-                    }`}
-                  >
-                    {entry.status_code}
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                  {entry.is_streaming ? (
-                    <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-purple-100 text-purple-800">
-                      Streaming
-                    </span>
-                  ) : (
-                    <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
-                      Standard
-                    </span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {sortedEntries.length === 0 && (
-        <div className="text-center py-12">
-          <p className="text-gray-500">No entries found.</p>
+    <Card className="hover:shadow-lg transition-shadow duration-200">
+      <CardHeader className="pb-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" aria-hidden="true" />
+          <Input
+            type="text"
+            placeholder="Search by ID, model, path, or method..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="pl-10"
+            aria-label="Search cache entries"
+          />
         </div>
-      )}
-    </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/50">
+                <TableHead
+                  className="font-semibold"
+                  aria-sort={sortField === 'id' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('id')}
+                  >
+                    ID {sortField === 'id' && (sortDirection === 'asc' ? '↑' : '↓')}
+                  </button>
+                </TableHead>
+                <TableHead
+                  className="font-semibold"
+                  aria-sort={sortField === 'model' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('model')}
+                  >
+                    Model {sortField === 'model' && (sortDirection === 'asc' ? '↑' : '↓')}
+                  </button>
+                </TableHead>
+                <TableHead
+                  className="font-semibold"
+                  aria-sort={sortField === 'method' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('method')}
+                  >
+                    Method {sortField === 'method' && (sortDirection === 'asc' ? '↑' : '↓')}
+                  </button>
+                </TableHead>
+                <TableHead
+                  className="font-semibold"
+                  aria-sort={sortField === 'path' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('path')}
+                  >
+                    Path {sortField === 'path' && (sortDirection === 'asc' ? '↑' : '↓')}
+                  </button>
+                </TableHead>
+                <TableHead
+                  className="font-semibold"
+                  aria-sort={sortField === 'status_code' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('status_code')}
+                  >
+                    Status {sortField === 'status_code' && (sortDirection === 'asc' ? '↑' : '↓')}
+                  </button>
+                </TableHead>
+                <TableHead className="font-semibold">
+                  Type
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sortedEntries.map((entry) => (
+                <TableRow
+                  key={entry.id}
+                  className="cursor-pointer hover:bg-muted/50 transition-colors"
+                  onClick={() => handleRowClick(entry.id)}
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      handleRowClick(entry.id);
+                    }
+                  }}
+                  role="button"
+                >
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    {entry.id.substring(0, 8)}...
+                  </TableCell>
+                  <TableCell className="font-medium">
+                    {entry.model || '-'}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary" className="font-mono text-xs">
+                      {entry.method}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-sm max-w-xs truncate">
+                    {entry.path}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={entry.status_code === 200 ? 'default' : 'destructive'}
+                      className="font-mono"
+                    >
+                      {entry.status_code}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {entry.is_streaming ? (
+                      <Badge variant="outline" className="border-primary/50 text-primary">
+                        Streaming
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary" className="text-muted-foreground">
+                        Standard
+                      </Badge>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+        {sortedEntries.length === 0 && (
+          <div className="text-center py-12 border-t">
+            <p className="text-muted-foreground">No entries found.</p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
