@@ -164,7 +164,7 @@ export default function EntryDetail() {
 
         {/* Request and Response Tabs */}
         <Tabs defaultValue="request" className="w-full">
-          <TabsList className="grid w-full grid-cols-3 h-12">
+          <TabsList className={`grid w-full h-12 ${entry.response.chunks && entry.response.chunks.length > 0 ? 'grid-cols-3' : 'grid-cols-2'}`}>
             <TabsTrigger value="request" className="flex items-center gap-2">
               <Mail className="w-4 h-4" />
               Request

@@ -59,13 +59,14 @@ export default function CacheTable({ entries }: CacheTableProps) {
     <Card className="hover:shadow-lg transition-shadow duration-200">
       <CardHeader className="pb-4">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" aria-hidden="true" />
           <Input
             type="text"
             placeholder="Search by ID, model, path, or method..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="pl-10"
+            aria-label="Search cache entries"
           />
         </div>
       </CardHeader>
@@ -75,44 +76,64 @@ export default function CacheTable({ entries }: CacheTableProps) {
             <TableHeader>
               <TableRow className="bg-muted/50">
                 <TableHead
-                  className="cursor-pointer hover:bg-muted transition-colors font-semibold"
-                  onClick={() => handleSort('id')}
+                  className="font-semibold"
+                  aria-sort={sortField === 'id' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                 >
-                  <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('id')}
+                  >
                     ID {sortField === 'id' && (sortDirection === 'asc' ? '↑' : '↓')}
-                  </div>
+                  </button>
                 </TableHead>
                 <TableHead
-                  className="cursor-pointer hover:bg-muted transition-colors font-semibold"
-                  onClick={() => handleSort('model')}
+                  className="font-semibold"
+                  aria-sort={sortField === 'model' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                 >
-                  <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('model')}
+                  >
                     Model {sortField === 'model' && (sortDirection === 'asc' ? '↑' : '↓')}
-                  </div>
+                  </button>
                 </TableHead>
                 <TableHead
-                  className="cursor-pointer hover:bg-muted transition-colors font-semibold"
-                  onClick={() => handleSort('method')}
+                  className="font-semibold"
+                  aria-sort={sortField === 'method' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                 >
-                  <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('method')}
+                  >
                     Method {sortField === 'method' && (sortDirection === 'asc' ? '↑' : '↓')}
-                  </div>
+                  </button>
                 </TableHead>
                 <TableHead
-                  className="cursor-pointer hover:bg-muted transition-colors font-semibold"
-                  onClick={() => handleSort('path')}
+                  className="font-semibold"
+                  aria-sort={sortField === 'path' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                 >
-                  <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('path')}
+                  >
                     Path {sortField === 'path' && (sortDirection === 'asc' ? '↑' : '↓')}
-                  </div>
+                  </button>
                 </TableHead>
                 <TableHead
-                  className="cursor-pointer hover:bg-muted transition-colors font-semibold"
-                  onClick={() => handleSort('status_code')}
+                  className="font-semibold"
+                  aria-sort={sortField === 'status_code' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                 >
-                  <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 w-full text-left hover:bg-muted transition-colors px-2 py-1 rounded"
+                    onClick={() => handleSort('status_code')}
+                  >
                     Status {sortField === 'status_code' && (sortDirection === 'asc' ? '↑' : '↓')}
-                  </div>
+                  </button>
                 </TableHead>
                 <TableHead className="font-semibold">
                   Type
@@ -125,6 +146,14 @@ export default function CacheTable({ entries }: CacheTableProps) {
                   key={entry.id}
                   className="cursor-pointer hover:bg-muted/50 transition-colors"
                   onClick={() => handleRowClick(entry.id)}
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      handleRowClick(entry.id);
+                    }
+                  }}
+                  role="button"
                 >
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {entry.id.substring(0, 8)}...

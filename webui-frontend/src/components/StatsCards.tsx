@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { TrendingUp, HardDrive, Radio, Settings } from 'lucide-react';
+import { TrendingUp, HardDrive, Radio, Settings, type LucideIcon } from 'lucide-react';
 
 interface StatCardProps {
   title: string;
@@ -7,7 +7,7 @@ interface StatCardProps {
   subtitle?: string;
 }
 
-const iconMap: Record<string, any> = {
+const iconMap: Record<string, LucideIcon> = {
   'Total Entries': TrendingUp,
   'Cache Size': HardDrive,
   'Streaming Responses': Radio,
@@ -17,10 +17,10 @@ const iconMap: Record<string, any> = {
 export default function StatsCards({ stats }: { stats: StatCardProps[] }) {
   return (
     <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-      {stats.map((stat, index) => {
+      {stats.map((stat) => {
         const Icon = iconMap[stat.title] || TrendingUp;
         return (
-          <Card key={index} className="hover:shadow-lg transition-shadow duration-200">
+          <Card key={stat.title} className="hover:shadow-lg transition-shadow duration-200">
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <div className="text-sm font-medium text-muted-foreground">{stat.title}</div>

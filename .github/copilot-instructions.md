@@ -109,7 +109,7 @@ npm run build  # Outputs to ../src/inference_gate/webui/static/
 **Code Style:**
 - Use TypeScript with strict type checking
 - Functional components with hooks (no class components)
-- Named exports for components
+- Use default exports for pages/components (e.g., Layout, CacheTable, Dashboard) to match existing codebase patterns
 - Path alias `@/` points to `src/` directory
 - Use shadcn/ui components instead of raw Tailwind classes
 - Use Lucide React icons for visual elements
