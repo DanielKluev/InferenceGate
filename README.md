@@ -1,67 +1,52 @@
-# InferenceReplay
+# InferenceGate
 
 Python library for efficient and convenient AI inference replay in testing, debugging and development, saving costs and time on repeated prompts.
 
 ## Installation
 
 ```bash
-pip install inference-replay
+pip install inference-gate
 ```
 
 ## Features
 
-- **Record Mode**: Transparently proxy requests to OpenAI API and cache all responses
-- **Development Mode**: Replay from cache when available, record new requests
-- **Replay Mode**: Only serve cached responses (for unit tests and CI)
+- **Record-and-Replay Mode**: Record new requests to cache, replay from cache when available
+- **Replay-Only Mode**: Only serve cached responses (for unit tests and CI)
+- Supports OpenAI Chat Completions API and Responses API
 - Supports streaming responses
 - Preserves prompt, temperature, model, and other metadata
+- YAML configuration file for persistent settings
 - CLI tools for easy management
 
-## Usage
+## Quick Start
 
-### CLI Commands
-
-#### Record Mode
-Proxy all requests to upstream OpenAI API and cache responses:
+### 1. Initialize Configuration (Optional)
 
 ```bash
-inference-replay record --port 8080 --upstream https://api.openai.com --api-key $OPENAI_API_KEY
+inference-gate config init
 ```
 
-#### Development Mode
-Replay from cache if available, otherwise proxy and record:
+This creates a configuration file at `$USERDIR/.InferenceGate/config.yaml`.
+
+### 2. Test Your Upstream API Connection
 
 ```bash
-inference-replay dev --port 8080 --cache-dir .inference_cache
+inference-gate test-upstream --api-key $OPENAI_API_KEY
 ```
 
-#### Replay Mode (Unit Tests / Copilot)
-Only replay cached responses, fail if not in cache:
+### 3. Start the Proxy
 
 ```bash
-inference-replay replay --port 8080 --cache-dir .inference_cache
+inference-gate start --api-key $OPENAI_API_KEY
 ```
 
-### Cache Management
+### 4. Test the Running Proxy
 
-List cached entries:
 ```bash
-inference-replay cache list
+inference-gate test-gate
 ```
 
-Show cache statistics:
-```bash
-inference-replay cache info
-```
-
-Clear cache:
-```bash
-inference-replay cache clear --yes
-```
-
-### Using with OpenAI Client
-
-Point your OpenAI client to the proxy:
+### 5. Point Your Client to the Proxy
 
 ```python
 from openai import OpenAI
@@ -77,11 +62,19 @@ response = client.chat.completions.create(
 )
 ```
 
-### Environment Variables
+## CLI Commands
 
-- `OPENAI_API_KEY`: OpenAI API key (used in record/dev modes)
+### Server Commands
 
-### Options
+#### `start` - Record-and-Replay Mode (Default)
+
+Replays cached inferences when available. On cache miss, forwards to upstream, records the response, and stores it for future replays.
+
+```bash
+inference-gate start [OPTIONS]
+```
+
+**Options:**
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -91,6 +84,152 @@ response = client.chat.completions.create(
 | `--upstream, -u` | Upstream API URL | https://api.openai.com |
 | `--api-key, -k` | OpenAI API key | $OPENAI_API_KEY |
 | `--verbose, -v` | Enable verbose logging | false |
+
+#### `replay` - Replay-Only Mode
+
+Only returns cached responses. Returns an error if a matching inference is not found in the cache. Useful for unit tests and CI pipelines.
+
+```bash
+inference-gate replay [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--port, -p` | Server port | 8080 |
+| `--host, -h` | Server host | 127.0.0.1 |
+| `--cache-dir, -c` | Cache directory | .inference_cache |
+| `--verbose, -v` | Enable verbose logging | false |
+
+### Test Commands
+
+#### `test-gate` - Test a Running InferenceGate Instance
+
+Sends a test prompt to a running InferenceGate proxy. Uses the same host/port from config, so no API key or extra options needed.
+
+```bash
+inference-gate test-gate [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|--------|
+| `--host, -h` | Host of the running instance | 127.0.0.1 |
+| `--port, -p` | Port of the running instance | 8080 |
+| `--model, -m` | Model to use | gpt-4o-mini |
+| `--prompt` | Custom test prompt | (built-in test prompt) |
+| `--verbose, -v` | Enable verbose logging | false |
+
+#### `test-upstream` - Test Upstream API Directly
+
+Sends a test prompt directly to the upstream API (bypassing InferenceGate) to verify the API key and endpoint.
+
+```bash
+inference-gate test-upstream [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|--------|
+| `--upstream, -u` | Upstream API URL | https://api.openai.com |
+| `--api-key, -k` | OpenAI API key | $OPENAI_API_KEY |
+| `--model, -m` | Model to use | gpt-4o-mini |
+| `--prompt` | Custom test prompt | (built-in test prompt) |
+| `--verbose, -v` | Enable verbose logging | false |
+
+### Cache Management
+
+#### `cache list` - List Cached Entries
+
+```bash
+inference-gate cache list [--cache-dir PATH]
+```
+
+#### `cache info` - Show Cache Statistics
+
+```bash
+inference-gate cache info [--cache-dir PATH]
+```
+
+#### `cache clear` - Clear All Cached Entries
+
+```bash
+inference-gate cache clear [--cache-dir PATH] [--yes]
+```
+
+### Configuration Management
+
+#### `config show` - Show Current Configuration
+
+```bash
+inference-gate config show
+```
+
+#### `config init` - Initialize Configuration File
+
+```bash
+inference-gate config init [--force]
+```
+
+#### `config path` - Show Configuration File Path
+
+```bash
+inference-gate config path
+```
+
+## Configuration File
+
+InferenceGate uses a YAML configuration file to store default settings. The file is located at:
+
+- **Windows**: `%USERPROFILE%\.InferenceGate\config.yaml`
+- **macOS/Linux**: `~/.InferenceGate/config.yaml`
+
+You can specify a custom path using the `--config` global option:
+
+```bash
+inference-gate --config /path/to/config.yaml start
+```
+
+### Configuration Options
+
+```yaml
+# Server settings
+host: "127.0.0.1"
+port: 8080
+
+# Upstream API settings
+upstream: "https://api.openai.com"
+# api_key is not stored in the config file for security
+# Use OPENAI_API_KEY environment variable instead
+
+# Storage settings
+cache_dir: ".inference_cache"
+
+# Logging settings
+verbose: false
+
+# Test command settings
+test_model: "gpt-4o-mini"
+test_prompt: "This is a test prompt. Reply with **ONLY** \"OK.\" to confirm that everything is ok. DO NOT output anything else."
+```
+
+### Configuration Priority
+
+Settings are loaded in the following order (later overrides earlier):
+
+1. Built-in defaults
+2. Configuration file
+3. Environment variables (`OPENAI_API_KEY`)
+4. Command-line options
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key (used in record/test modes) |
 
 ## Development
 
