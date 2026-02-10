@@ -1,0 +1,42 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "model": "gpt-3.5-turbo",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello!"
+        }
+      ]
+    },
+    "query_params": null
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "id": "chatcmpl-test456",
+      "object": "chat.completion",
+      "choices": [
+        {
+          "message": {
+            "role": "assistant",
+            "content": "Hi there!"
+          }
+        }
+      ]
+    },
+    "chunks": null,
+    "is_streaming": false
+  },
+  "model": "gpt-3.5-turbo",
+  "temperature": null,
+  "prompt_hash": null
+}
