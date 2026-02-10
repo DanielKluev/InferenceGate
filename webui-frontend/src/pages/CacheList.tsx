@@ -4,7 +4,8 @@ import type { CacheEntry } from '../api/client';
 import CacheTable from '../components/CacheTable';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { AlertCircle } from 'lucide-react';
 
 export default function CacheList() {
   const [entries, setEntries] = useState<CacheEntry[]>([]);
@@ -27,8 +28,11 @@ export default function CacheList() {
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-0">
-        <h2 className="text-2xl font-bold mb-6">Cache Entries</h2>
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight mb-2">Cache Entries</h2>
+          <p className="text-muted-foreground">Browse and search cached inference requests</p>
+        </div>
         <Card>
           <CardHeader>
             <Skeleton className="h-10 w-full" />
@@ -36,7 +40,7 @@ export default function CacheList() {
           <CardContent>
             <div className="space-y-3">
               {[1, 2, 3, 4, 5].map((i) => (
-                <Skeleton key={i} className="h-12 w-full" />
+                <Skeleton key={i} className="h-14 w-full" />
               ))}
             </div>
           </CardContent>
@@ -47,17 +51,26 @@ export default function CacheList() {
 
   if (error) {
     return (
-      <div className="px-4 sm:px-0">
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight mb-2">Cache Entries</h2>
+          <p className="text-muted-foreground">Browse and search cached inference requests</p>
+        </div>
         <Alert variant="destructive">
-          <AlertDescription>Error: {error}</AlertDescription>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       </div>
     );
   }
 
   return (
-    <div className="px-4 sm:px-0">
-      <h2 className="text-2xl font-bold mb-6">Cache Entries</h2>
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-3xl font-bold tracking-tight mb-2">Cache Entries</h2>
+        <p className="text-muted-foreground">Browse and search cached inference requests</p>
+      </div>
       <CacheTable entries={entries} />
     </div>
   );

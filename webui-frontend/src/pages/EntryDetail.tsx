@@ -6,10 +6,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, AlertCircle, FileCode, Mail, Package } from 'lucide-react';
 
 export default function EntryDetail() {
   const { id } = useParams<{ id: string }>();
@@ -39,9 +39,9 @@ export default function EntryDetail() {
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-0">
-        <div className="mb-6 flex items-center justify-between">
-          <Skeleton className="h-8 w-48" />
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-10 w-64" />
           <Skeleton className="h-10 w-32" />
         </div>
         <div className="space-y-6">
@@ -60,79 +60,100 @@ export default function EntryDetail() {
 
   if (error) {
     return (
-      <div className="px-4 sm:px-0">
-        <Alert variant="destructive" className="mb-4">
-          <AlertDescription>Error: {error}</AlertDescription>
+      <div className="space-y-6">
+        <div className="flex items-center gap-4">
+          <Button
+            onClick={() => navigate('/cache')}
+            variant="ghost"
+            size="sm"
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back
+          </Button>
+          <h2 className="text-3xl font-bold tracking-tight">Entry Detail</h2>
+        </div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
-        <Button
-          onClick={() => navigate('/cache')}
-          variant="ghost"
-        >
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back to Cache List
-        </Button>
       </div>
     );
   }
 
   if (!entry) {
     return (
-      <div className="px-4 sm:px-0">
-        <Alert className="mb-4">
-          <AlertDescription>Entry not found</AlertDescription>
+      <div className="space-y-6">
+        <div className="flex items-center gap-4">
+          <Button
+            onClick={() => navigate('/cache')}
+            variant="ghost"
+            size="sm"
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back
+          </Button>
+          <h2 className="text-3xl font-bold tracking-tight">Entry Detail</h2>
+        </div>
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Not Found</AlertTitle>
+          <AlertDescription>The requested cache entry was not found.</AlertDescription>
         </Alert>
-        <Button
-          onClick={() => navigate('/cache')}
-          variant="ghost"
-        >
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back to Cache List
-        </Button>
       </div>
     );
   }
 
   return (
-    <div className="px-4 sm:px-0">
-      <div className="mb-6 flex items-center justify-between">
-        <h2 className="text-2xl font-bold">Cache Entry Detail</h2>
-        <Button
-          onClick={() => navigate('/cache')}
-          variant="ghost"
-        >
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back to List
-        </Button>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Button
+            onClick={() => navigate('/cache')}
+            variant="ghost"
+            size="sm"
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back
+          </Button>
+          <div>
+            <h2 className="text-3xl font-bold tracking-tight">Entry Detail</h2>
+            <p className="text-muted-foreground mt-1">Cache entry {entry.id.substring(0, 8)}...</p>
+          </div>
+        </div>
       </div>
 
       <div className="space-y-6">
         {/* Metadata */}
-        <Card>
+        <Card className="hover:shadow-lg transition-shadow duration-200">
           <CardHeader>
-            <CardTitle>Metadata</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <FileCode className="w-5 h-5" />
+              Metadata
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">ID</dt>
-                <dd className="mt-1 text-sm font-mono">{entry.id}</dd>
+            <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="p-3 rounded-lg bg-muted/50">
+                <dt className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">ID</dt>
+                <dd className="text-sm font-mono truncate">{entry.id}</dd>
               </div>
               {entry.model && (
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Model</dt>
-                  <dd className="mt-1 text-sm">{entry.model}</dd>
+                <div className="p-3 rounded-lg bg-muted/50">
+                  <dt className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Model</dt>
+                  <dd className="text-sm font-semibold">{entry.model}</dd>
                 </div>
               )}
               {entry.temperature !== null && (
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Temperature</dt>
-                  <dd className="mt-1 text-sm">{entry.temperature}</dd>
+                <div className="p-3 rounded-lg bg-muted/50">
+                  <dt className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Temperature</dt>
+                  <dd className="text-sm font-semibold">{entry.temperature}</dd>
                 </div>
               )}
               {entry.prompt_hash && (
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Prompt Hash</dt>
-                  <dd className="mt-1 text-sm font-mono">{entry.prompt_hash}</dd>
+                <div className="p-3 rounded-lg bg-muted/50">
+                  <dt className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Prompt Hash</dt>
+                  <dd className="text-sm font-mono truncate">{entry.prompt_hash}</dd>
                 </div>
               )}
             </dl>
@@ -143,35 +164,44 @@ export default function EntryDetail() {
 
         {/* Request and Response Tabs */}
         <Tabs defaultValue="request" className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="request">Request</TabsTrigger>
-            <TabsTrigger value="response">Response</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-3 h-12">
+            <TabsTrigger value="request" className="flex items-center gap-2">
+              <Mail className="w-4 h-4" />
+              Request
+            </TabsTrigger>
+            <TabsTrigger value="response" className="flex items-center gap-2">
+              <Package className="w-4 h-4" />
+              Response
+            </TabsTrigger>
             {entry.response.chunks && entry.response.chunks.length > 0 && (
-              <TabsTrigger value="chunks">Chunks ({entry.response.chunks.length})</TabsTrigger>
+              <TabsTrigger value="chunks" className="flex items-center gap-2">
+                <FileCode className="w-4 h-4" />
+                Chunks ({entry.response.chunks.length})
+              </TabsTrigger>
             )}
           </TabsList>
 
-          <TabsContent value="request">
-            <Card>
+          <TabsContent value="request" className="mt-6">
+            <Card className="hover:shadow-lg transition-shadow duration-200">
               <CardHeader>
-                <CardTitle>Request</CardTitle>
+                <CardTitle>Request Details</CardTitle>
               </CardHeader>
               <CardContent>
-                <dl className="space-y-4">
+                <dl className="space-y-6">
                   <div>
-                    <dt className="text-sm font-medium text-muted-foreground">Method & Path</dt>
-                    <dd className="mt-1 text-sm">
-                      <Badge variant="secondary">
+                    <dt className="text-sm font-medium text-muted-foreground mb-2">Method & Path</dt>
+                    <dd className="flex items-center gap-2">
+                      <Badge variant="secondary" className="font-mono">
                         {entry.request.method}
                       </Badge>
-                      <span className="ml-2">{entry.request.path}</span>
+                      <span className="font-mono text-sm">{entry.request.path}</span>
                     </dd>
                   </div>
                   {entry.request.headers && Object.keys(entry.request.headers).length > 0 && (
                     <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Headers</dt>
-                      <dd className="mt-1">
-                        <pre className="text-xs bg-muted p-3 rounded overflow-x-auto">
+                      <dt className="text-sm font-medium text-muted-foreground mb-2">Headers</dt>
+                      <dd>
+                        <pre className="text-xs bg-muted p-4 rounded-lg overflow-x-auto border">
                           {JSON.stringify(entry.request.headers, null, 2)}
                         </pre>
                       </dd>
@@ -179,9 +209,9 @@ export default function EntryDetail() {
                   )}
                   {entry.request.body && (
                     <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Body</dt>
-                      <dd className="mt-1">
-                        <pre className="text-xs bg-muted p-3 rounded overflow-x-auto">
+                      <dt className="text-sm font-medium text-muted-foreground mb-2">Body</dt>
+                      <dd>
+                        <pre className="text-xs bg-muted p-4 rounded-lg overflow-x-auto border">
                           {JSON.stringify(entry.request.body, null, 2)}
                         </pre>
                       </dd>
@@ -192,23 +222,24 @@ export default function EntryDetail() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="response">
-            <Card>
+          <TabsContent value="response" className="mt-6">
+            <Card className="hover:shadow-lg transition-shadow duration-200">
               <CardHeader>
-                <CardTitle>Response</CardTitle>
+                <CardTitle>Response Details</CardTitle>
               </CardHeader>
               <CardContent>
-                <dl className="space-y-4">
+                <dl className="space-y-6">
                   <div>
-                    <dt className="text-sm font-medium text-muted-foreground">Status Code</dt>
-                    <dd className="mt-1 text-sm">
+                    <dt className="text-sm font-medium text-muted-foreground mb-2">Status Code</dt>
+                    <dd className="flex items-center gap-2">
                       <Badge
                         variant={entry.response.status_code === 200 ? 'default' : 'destructive'}
+                        className="font-mono"
                       >
                         {entry.response.status_code}
                       </Badge>
                       {entry.response.is_streaming && (
-                        <Badge variant="outline" className="ml-2">
+                        <Badge variant="outline" className="border-primary/50 text-primary">
                           Streaming
                         </Badge>
                       )}
@@ -216,9 +247,9 @@ export default function EntryDetail() {
                   </div>
                   {entry.response.headers && Object.keys(entry.response.headers).length > 0 && (
                     <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Headers</dt>
-                      <dd className="mt-1">
-                        <pre className="text-xs bg-muted p-3 rounded overflow-x-auto">
+                      <dt className="text-sm font-medium text-muted-foreground mb-2">Headers</dt>
+                      <dd>
+                        <pre className="text-xs bg-muted p-4 rounded-lg overflow-x-auto border">
                           {JSON.stringify(entry.response.headers, null, 2)}
                         </pre>
                       </dd>
@@ -226,9 +257,9 @@ export default function EntryDetail() {
                   )}
                   {entry.response.body && (
                     <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Body</dt>
-                      <dd className="mt-1">
-                        <pre className="text-xs bg-muted p-3 rounded overflow-x-auto">
+                      <dt className="text-sm font-medium text-muted-foreground mb-2">Body</dt>
+                      <dd>
+                        <pre className="text-xs bg-muted p-4 rounded-lg overflow-x-auto border">
                           {JSON.stringify(entry.response.body, null, 2)}
                         </pre>
                       </dd>
@@ -240,13 +271,13 @@ export default function EntryDetail() {
           </TabsContent>
 
           {entry.response.chunks && entry.response.chunks.length > 0 && (
-            <TabsContent value="chunks">
-              <Card>
+            <TabsContent value="chunks" className="mt-6">
+              <Card className="hover:shadow-lg transition-shadow duration-200">
                 <CardHeader>
                   <CardTitle>Streaming Chunks ({entry.response.chunks.length})</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <pre className="text-xs bg-muted p-3 rounded overflow-x-auto">
+                  <pre className="text-xs bg-muted p-4 rounded-lg overflow-x-auto border max-h-96">
                     {entry.response.chunks.join('')}
                   </pre>
                 </CardContent>

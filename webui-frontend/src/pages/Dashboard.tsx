@@ -4,7 +4,8 @@ import type { CacheStats, Config } from '../api/client';
 import StatsCards from '../components/StatsCards';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { AlertCircle } from 'lucide-react';
 
 export default function Dashboard() {
   const [stats, setStats] = useState<CacheStats | null>(null);
@@ -32,16 +33,19 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-0">
-        <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
-        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="space-y-8">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight mb-2">Dashboard</h2>
+          <p className="text-muted-foreground">Monitor your inference cache performance</p>
+        </div>
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {[1, 2, 3, 4].map((i) => (
             <Card key={i}>
-              <CardHeader className="pb-2">
-                <Skeleton className="h-4 w-24" />
+              <CardHeader className="pb-3">
+                <Skeleton className="h-4 w-32" />
               </CardHeader>
               <CardContent>
-                <Skeleton className="h-8 w-16" />
+                <Skeleton className="h-10 w-24" />
               </CardContent>
             </Card>
           ))}
@@ -52,9 +56,15 @@ export default function Dashboard() {
 
   if (error) {
     return (
-      <div className="px-4 sm:px-0">
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight mb-2">Dashboard</h2>
+          <p className="text-muted-foreground">Monitor your inference cache performance</p>
+        </div>
         <Alert variant="destructive">
-          <AlertDescription>Error: {error}</AlertDescription>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       </div>
     );
@@ -88,58 +98,61 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="px-4 sm:px-0">
-      <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-3xl font-bold tracking-tight mb-2">Dashboard</h2>
+        <p className="text-muted-foreground">Monitor your inference cache performance</p>
+      </div>
       
       <StatsCards stats={statsCards} />
 
-      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <Card>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card className="hover:shadow-lg transition-shadow duration-200">
           <CardHeader>
-            <CardTitle>Configuration</CardTitle>
+            <CardTitle className="text-lg">Configuration</CardTitle>
           </CardHeader>
           <CardContent>
-            <dl className="space-y-2">
-              <div className="flex justify-between">
-                <dt className="text-sm text-muted-foreground">Mode:</dt>
-                <dd className="text-sm font-medium">{config?.mode}</dd>
+            <dl className="space-y-3">
+              <div className="flex items-center justify-between py-2 border-b border-border/50">
+                <dt className="text-sm font-medium text-muted-foreground">Mode</dt>
+                <dd className="text-sm font-semibold">{config?.mode}</dd>
               </div>
-              <div className="flex justify-between">
-                <dt className="text-sm text-muted-foreground">Proxy:</dt>
-                <dd className="text-sm font-medium">
+              <div className="flex items-center justify-between py-2 border-b border-border/50">
+                <dt className="text-sm font-medium text-muted-foreground">Proxy</dt>
+                <dd className="text-sm font-mono">
                   {config?.host}:{config?.port}
                 </dd>
               </div>
               {config?.upstream_url && (
-                <div className="flex justify-between">
-                  <dt className="text-sm text-muted-foreground">Upstream:</dt>
-                  <dd className="text-sm font-medium">{config?.upstream_url}</dd>
+                <div className="flex items-center justify-between py-2 border-b border-border/50">
+                  <dt className="text-sm font-medium text-muted-foreground">Upstream</dt>
+                  <dd className="text-sm font-mono truncate max-w-[200px]">{config?.upstream_url}</dd>
                 </div>
               )}
-              <div className="flex justify-between">
-                <dt className="text-sm text-muted-foreground">Cache Directory:</dt>
-                <dd className="text-sm font-medium font-mono">{config?.cache_dir}</dd>
+              <div className="flex items-center justify-between py-2">
+                <dt className="text-sm font-medium text-muted-foreground">Cache Directory</dt>
+                <dd className="text-sm font-mono truncate max-w-[200px]">{config?.cache_dir}</dd>
               </div>
             </dl>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="hover:shadow-lg transition-shadow duration-200">
           <CardHeader>
-            <CardTitle>Entries by Model</CardTitle>
+            <CardTitle className="text-lg">Entries by Model</CardTitle>
           </CardHeader>
           <CardContent>
             {stats && Object.keys(stats.entries_by_model).length > 0 ? (
-              <dl className="space-y-2">
+              <dl className="space-y-3">
                 {Object.entries(stats.entries_by_model).map(([model, count]) => (
-                  <div key={model} className="flex justify-between">
-                    <dt className="text-sm text-muted-foreground">{model}:</dt>
-                    <dd className="text-sm font-medium">{count}</dd>
+                  <div key={model} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
+                    <dt className="text-sm font-medium text-muted-foreground truncate">{model}</dt>
+                    <dd className="text-sm font-semibold ml-4">{count}</dd>
                   </div>
                 ))}
               </dl>
             ) : (
-              <p className="text-sm text-muted-foreground">No entries yet</p>
+              <p className="text-sm text-muted-foreground text-center py-8">No entries yet</p>
             )}
           </CardContent>
         </Card>
