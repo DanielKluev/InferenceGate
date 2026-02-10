@@ -210,3 +210,5 @@ __marimo__/
 
 # Local inference cache
 .inference_cache/
+.test_cache/
+

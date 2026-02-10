@@ -47,6 +47,9 @@ Repository = "https://github.com/DanielKluev/InferenceGate"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"inference_gate.webui" = ["static/**/*"]
+
 # -------------------------------------------------------------------
 # YAPF configuration section
 

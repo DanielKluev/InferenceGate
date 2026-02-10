@@ -88,10 +88,12 @@ def main(ctx: click.Context, config_path: str | None) -> None:
 @click.option("--cache-dir", "-c", default=None, help="Directory to store cached responses (default: .inference_cache)")
 @click.option("--upstream", "-u", default=None, help="Upstream OpenAI API base URL (default: https://api.openai.com)")
 @click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (defaults to OPENAI_API_KEY env var)")
+@click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
+@click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
-          verbose: bool | None) -> None:
+          web_ui: bool, web_ui_port: int, verbose: bool | None) -> None:
     """
     Start in record-and-replay mode (default).
 
@@ -113,12 +115,14 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.RECORD_AND_REPLAY, cache_dir=actual_cache_dir,
-                         upstream_base_url=actual_upstream, api_key=actual_api_key)
+                         upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port)
 
     click.echo("Starting InferenceGate in record-and-replay mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Upstream: {actual_upstream}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
+    if web_ui:
+        click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
     asyncio.run(gate.run_forever())
 
@@ -127,9 +131,12 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
 @click.option("--port", "-p", default=None, type=int, help="Port to run the server on (default: 8080)")
 @click.option("--host", "-h", default=None, help="Host to bind the server to (default: 127.0.0.1)")
 @click.option("--cache-dir", "-c", default=None, help="Directory to store cached responses (default: .inference_cache)")
+@click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
+@click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
-def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, verbose: bool | None) -> None:
+def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, web_ui: bool, web_ui_port: int,
+           verbose: bool | None) -> None:
     """
     Start in replay-only mode.
 
@@ -148,11 +155,14 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
 
     setup_logging(actual_verbose)
 
-    gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.REPLAY_ONLY, cache_dir=actual_cache_dir)
+    gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.REPLAY_ONLY, cache_dir=actual_cache_dir, web_ui=web_ui,
+                         web_ui_port=web_ui_port)
 
     click.echo("Starting InferenceGate in replay-only mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
+    if web_ui:
+        click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
     asyncio.run(gate.run_forever())
 
@@ -314,8 +324,7 @@ def _print_test_result(success: bool, response: str, ctx: click.Context) -> None
 @click.option("--prompt", default=None, help="Custom prompt to send")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
-def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None,
-              verbose: bool | None) -> None:
+def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None, verbose: bool | None) -> None:
     """
     Test a running InferenceGate instance.
 

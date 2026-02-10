@@ -25,9 +25,9 @@ class InferenceGate:
     and CacheStorage. Handles startup and shutdown lifecycle.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY,
-                 cache_dir: str = ".inference_cache", upstream_base_url: str = "https://api.openai.com",
-                 api_key: str | None = None) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
+                 upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
+                 web_ui_port: int = 8081) -> None:
         """
         Initialize InferenceGate with configuration.
 
@@ -36,6 +36,8 @@ class InferenceGate:
         `cache_dir` is the directory for storing cached inferences.
         `upstream_base_url` is the real AI API endpoint URL.
         `api_key` is the API key for upstream authentication.
+        `web_ui` enables the optional web dashboard.
+        `web_ui_port` is the port for the web UI server.
         """
         self.log = logging.getLogger("InferenceGate")
         self.host = host
@@ -44,18 +46,21 @@ class InferenceGate:
         self.cache_dir = cache_dir
         self.upstream_base_url = upstream_base_url
         self.api_key = api_key
+        self.web_ui = web_ui
+        self.web_ui_port = web_ui_port
 
         # Components (created during start)
         self._storage: CacheStorage | None = None
         self._outflow: OutflowClient | None = None
         self._router: Router | None = None
         self._server: InflowServer | None = None
+        self._webui_server: "WebUIServer | None" = None
 
     def _create_components(self) -> None:
         """
         Create all system components based on configuration.
 
-        Creates CacheStorage, OutflowClient (if needed), Router, and InflowServer.
+        Creates CacheStorage, OutflowClient (if needed), Router, InflowServer, and optionally WebUIServer.
         """
         self._storage = CacheStorage(self.cache_dir)
 
@@ -68,12 +73,23 @@ class InferenceGate:
         self._router = Router(mode=self.mode, storage=self._storage, outflow=self._outflow)
         self._server = InflowServer(host=self.host, port=self.port, router=self._router)
 
+        # WebUIServer is optional
+        if self.web_ui:
+            from inference_gate.webui.server import WebUIServer
+            # Only expose a non-None upstream_base_url to the WebUI when we actually have upstream access enabled.
+            webui_upstream_base_url = self.upstream_base_url if self.mode == Mode.RECORD_AND_REPLAY else None
+            # For security, always bind WebUI to localhost unless user explicitly configures a different host
+            webui_host = "127.0.0.1"
+            self._webui_server = WebUIServer(host=webui_host, port=self.web_ui_port, storage=self._storage, mode=self.mode,
+                                             cache_dir=self.cache_dir, upstream_base_url=webui_upstream_base_url, proxy_host=self.host,
+                                             proxy_port=self.port)
+
     async def start(self) -> None:
         """
         Start InferenceGate and all its components.
 
         Creates components, starts the outflow client (if applicable),
-        and starts the inflow HTTP server.
+        and starts the inflow HTTP server and WebUI server (if enabled).
         """
         self.log.info("Starting InferenceGate in %s mode", self.mode.value)
         self._create_components()
@@ -86,15 +102,24 @@ class InferenceGate:
         assert self._server is not None
         await self._server.start()
 
+        # Start the WebUI server if enabled
+        if self._webui_server is not None:
+            await self._webui_server.start()
+
         self.log.info("InferenceGate ready on http://%s:%d", self.host, self.port)
+        if self._webui_server is not None:
+            self.log.info("WebUI dashboard available at http://127.0.0.1:%d", self.web_ui_port)
 
     async def stop(self) -> None:
         """
         Stop InferenceGate and all its components.
 
-        Stops the inflow server and outflow client in order.
+        Stops the inflow server, WebUI server (if enabled), and outflow client in order.
         """
         self.log.info("Stopping InferenceGate")
+
+        if self._webui_server is not None:
+            await self._webui_server.stop()
 
         if self._server is not None:
             await self._server.stop()
