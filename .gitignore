@@ -209,4 +209,4 @@ marimo/_lsp/
 __marimo__/
 
 # Local inference cache
-.inference_cache/
+.inference_cache/.test_cache/
