@@ -71,6 +71,57 @@ class ClassName1:
 
 ## 5) Building and running
 
+### Backend
+- Install the package: `pip install -e .`
+- Run the CLI: `python -m inference_gate.cli --help`
+- Start the proxy server with WebUI: `python -m inference_gate.cli --webui-port 8081`
+
+### WebUI (Frontend)
+The WebUI is a React-based single-page application (SPA) built with modern web technologies:
+
+**Tech Stack:**
+- React 19 with TypeScript
+- Vite for build tooling
+- Tailwind CSS v4 for styling
+- shadcn/ui component library (Radix UI primitives)
+- React Router for client-side routing
+
+**Development:**
+```bash
+cd webui-frontend
+npm install
+npm run dev    # Start dev server on http://localhost:5173
+```
+
+**Building:**
+```bash
+cd webui-frontend
+npm run build  # Outputs to ../src/inference_gate/webui/static/
+```
+
+**Structure:**
+- `webui-frontend/src/components/` - Reusable React components
+- `webui-frontend/src/components/ui/` - shadcn/ui component library
+- `webui-frontend/src/pages/` - Page-level components (Dashboard, CacheList, EntryDetail)
+- `webui-frontend/src/api/` - API client for backend communication
+- Built assets are served by the Python backend's aiohttp server
+
+**Code Style:**
+- Use TypeScript with strict type checking
+- Functional components with hooks (no class components)
+- Use default exports for pages/components (e.g., Layout, CacheTable, Dashboard) to match existing codebase patterns
+- Path alias `@/` points to `src/` directory
+- Use shadcn/ui components instead of raw Tailwind classes
+- Use Lucide React icons for visual elements
+- Follow existing component patterns (Card, Badge, Button, etc.)
+
+**Design System:**
+- shadcn/ui provides consistent design tokens via CSS variables
+- Color palette defined in `src/index.css` using HSL values
+- Use semantic color names: `background`, `foreground`, `primary`, `secondary`, `muted`, `destructive`, etc.
+- Responsive design with mobile-first approach
+- Hover effects and transitions for interactive elements
+
 ## 6) Tests and validation
 
 - Unit tests are located in the `tests/` directory. Each module should have a corresponding test file, e.g. `module_name.py` should have `test_module_name.py`.

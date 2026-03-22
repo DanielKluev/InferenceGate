@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react';
 import { getCacheStats, getConfig } from '../api/client';
 import type { CacheStats, Config } from '../api/client';
 import StatsCards from '../components/StatsCards';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { AlertCircle } from 'lucide-react';
 
 export default function Dashboard() {
   const [stats, setStats] = useState<CacheStats | null>(null);
@@ -29,16 +33,39 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="text-gray-500">Loading...</div>
+      <div className="space-y-8">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight mb-2">Dashboard</h2>
+          <p className="text-muted-foreground">Monitor your inference cache performance</p>
+        </div>
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i}>
+              <CardHeader className="pb-3">
+                <Skeleton className="h-4 w-32" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-10 w-24" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-md p-4">
-        <p className="text-red-800">Error: {error}</p>
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight mb-2">Dashboard</h2>
+          <p className="text-muted-foreground">Monitor your inference cache performance</p>
+        </div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       </div>
     );
   }
@@ -71,53 +98,64 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="px-4 sm:px-0">
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">Dashboard</h2>
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-3xl font-bold tracking-tight mb-2">Dashboard</h2>
+        <p className="text-muted-foreground">Monitor your inference cache performance</p>
+      </div>
       
       <StatsCards stats={statsCards} />
 
-      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="bg-white shadow rounded-lg p-6">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Configuration</h3>
-          <dl className="space-y-2">
-            <div className="flex justify-between">
-              <dt className="text-sm text-gray-500">Mode:</dt>
-              <dd className="text-sm font-medium text-gray-900">{config?.mode}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-sm text-gray-500">Proxy:</dt>
-              <dd className="text-sm font-medium text-gray-900">
-                {config?.host}:{config?.port}
-              </dd>
-            </div>
-            {config?.upstream_url && (
-              <div className="flex justify-between">
-                <dt className="text-sm text-gray-500">Upstream:</dt>
-                <dd className="text-sm font-medium text-gray-900">{config?.upstream_url}</dd>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card className="hover:shadow-lg transition-shadow duration-200">
+          <CardHeader>
+            <CardTitle className="text-lg">Configuration</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl className="space-y-3">
+              <div className="flex items-center justify-between py-2 border-b border-border/50">
+                <dt className="text-sm font-medium text-muted-foreground">Mode</dt>
+                <dd className="text-sm font-semibold">{config?.mode}</dd>
               </div>
-            )}
-            <div className="flex justify-between">
-              <dt className="text-sm text-gray-500">Cache Directory:</dt>
-              <dd className="text-sm font-medium text-gray-900 font-mono">{config?.cache_dir}</dd>
-            </div>
-          </dl>
-        </div>
-
-        <div className="bg-white shadow rounded-lg p-6">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Entries by Model</h3>
-          {stats && Object.keys(stats.entries_by_model).length > 0 ? (
-            <dl className="space-y-2">
-              {Object.entries(stats.entries_by_model).map(([model, count]) => (
-                <div key={model} className="flex justify-between">
-                  <dt className="text-sm text-gray-500">{model}:</dt>
-                  <dd className="text-sm font-medium text-gray-900">{count}</dd>
+              <div className="flex items-center justify-between py-2 border-b border-border/50">
+                <dt className="text-sm font-medium text-muted-foreground">Proxy</dt>
+                <dd className="text-sm font-mono">
+                  {config?.host}:{config?.port}
+                </dd>
+              </div>
+              {config?.upstream_url && (
+                <div className="flex items-center justify-between py-2 border-b border-border/50">
+                  <dt className="text-sm font-medium text-muted-foreground">Upstream</dt>
+                  <dd className="text-sm font-mono truncate max-w-[200px]">{config?.upstream_url}</dd>
                 </div>
-              ))}
+              )}
+              <div className="flex items-center justify-between py-2">
+                <dt className="text-sm font-medium text-muted-foreground">Cache Directory</dt>
+                <dd className="text-sm font-mono truncate max-w-[200px]">{config?.cache_dir}</dd>
+              </div>
             </dl>
-          ) : (
-            <p className="text-sm text-gray-500">No entries yet</p>
-          )}
-        </div>
+          </CardContent>
+        </Card>
+
+        <Card className="hover:shadow-lg transition-shadow duration-200">
+          <CardHeader>
+            <CardTitle className="text-lg">Entries by Model</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {stats && Object.keys(stats.entries_by_model).length > 0 ? (
+              <dl className="space-y-3">
+                {Object.entries(stats.entries_by_model).map(([model, count]) => (
+                  <div key={model} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
+                    <dt className="text-sm font-medium text-muted-foreground truncate">{model}</dt>
+                    <dd className="text-sm font-semibold ml-4">{count}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-8">No entries yet</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
