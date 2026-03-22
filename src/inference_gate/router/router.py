@@ -119,18 +119,16 @@ class Router:
         """
         Attempt a fuzzy model match by prompt hash.
 
-        Computes the prompt hash from the request body's messages and
-        searches the cache for any entry with the same prompt hash,
+        Uses `_extract_metadata()` to compute the prompt hash from the request body
+        and searches the cache for any entry with the same prompt hash,
         regardless of which model was used to record it.
 
         Returns a `CacheEntry` if a fuzzy match is found, None otherwise.
         """
-        if not body:
+        # Reuse centralized metadata extraction (including prompt hash computation)
+        _, _, prompt_hash = self._extract_metadata(body)
+        if not prompt_hash:
             return None
-        messages = body.get("messages")
-        if not messages:
-            return None
-        prompt_hash = CacheStorage.compute_prompt_hash(messages)
         entry = self.storage.get_by_prompt_hash(prompt_hash)
         if entry is not None:
             self.log.info("Fuzzy model match found (prompt_hash=%s, cached_model=%s)", prompt_hash, entry.model)

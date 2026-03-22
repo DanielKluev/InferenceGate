@@ -91,8 +91,8 @@ def main(ctx: click.Context, config_path: str | None) -> None:
 @click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (defaults to OPENAI_API_KEY env var)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
-@click.option("--fuzzy-model-matching", is_flag=True, default=None,
-              help="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
+@click.option("--fuzzy-model-matching/--no-fuzzy-model-matching", default=None,
+              help="Enable or disable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
@@ -140,8 +140,8 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
 @click.option("--cache-dir", "-c", default=None, help="Directory to store cached responses (default: .inference_cache)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
-@click.option("--fuzzy-model-matching", is_flag=True, default=None,
-              help="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
+@click.option("--fuzzy-model-matching/--no-fuzzy-model-matching", default=None,
+              help="Enable or disable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, web_ui: bool, web_ui_port: int,

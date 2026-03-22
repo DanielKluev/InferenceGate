@@ -376,6 +376,39 @@ class TestFuzzyModelMatchingViaPytestPlugin:
         result = pytester.runpytest("-v", "-s")
         result.assert_outcomes(passed=1)
 
+    def test_no_fuzzy_matching_cli_overrides_ini(self, pytester):
+        """--no-inferencegate-fuzzy-model-matching CLI flag overrides ini=true, returning 503 on model mismatch."""
+        pytester.makepyfile(
+            textwrap.dedent(f"""
+            import http.client
+            import json
+            import urllib.parse
+
+            OK_PROMPT = 'This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.'
+
+            def test_no_fuzzy(inference_gate_url):
+                parsed = urllib.parse.urlparse(inference_gate_url)
+                conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+                body = json.dumps({{
+                    "model": "nonexistent-model",
+                    "messages": [{{"role": "user", "content": OK_PROMPT}}],
+                    "max_tokens": 50,
+                }})
+                conn.request("POST", "/v1/chat/completions",
+                             body=body,
+                             headers={{"Content-Type": "application/json"}})
+                resp = conn.getresponse()
+                assert resp.status == 503
+                conn.close()
+        """))
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+            inferencegate_fuzzy_model_matching = true
+        """)
+        result = pytester.runpytest("-v", "-s", "--no-inferencegate-fuzzy-model-matching")
+        result.assert_outcomes(passed=1)
+
 
 class TestRequiresRecordingMarker:
     """Tests for the @pytest.mark.requires_recording marker behavior."""
