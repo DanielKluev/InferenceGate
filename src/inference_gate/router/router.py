@@ -21,24 +21,30 @@ class Router:
 
     In `RECORD_AND_REPLAY` mode, checks cache first and returns cached response
     if available. On cache miss, forwards to upstream via OutflowClient, records
-    the response, and returns it.
+    the response, and returns it. Requests are forced to use streaming when sent
+    upstream (unless the model is in `non_streaming_models`) so that a single
+    streaming cassette can serve both streaming and non-streaming clients.
 
     In `REPLAY_ONLY` mode, only returns cached responses. Returns an error
     response on cache miss.
     """
 
-    def __init__(self, mode: Mode, storage: CacheStorage, outflow: OutflowClient | None = None) -> None:
+    def __init__(self, mode: Mode, storage: CacheStorage, outflow: OutflowClient | None = None,
+                 non_streaming_models: list[str] | None = None) -> None:
         """
         Initialize the router.
 
         `mode` determines the routing behavior.
         `storage` is the cache storage for recorded inferences.
         `outflow` is the client for forwarding to upstream (required for RECORD_AND_REPLAY mode).
+        `non_streaming_models` is a list of model names that do not support streaming
+        and should not be forced to stream.
         """
         self.log = logging.getLogger("Router")
         self.mode = mode
         self.storage = storage
         self.outflow = outflow
+        self.non_streaming_models = non_streaming_models or []
 
         if mode == Mode.RECORD_AND_REPLAY and outflow is None:
             raise ValueError("OutflowClient is required for RECORD_AND_REPLAY mode")
@@ -130,7 +136,8 @@ class Router:
         Handle request in RECORD_AND_REPLAY mode.
 
         Returns cached response if found. On cache miss, forwards to upstream
-        via OutflowClient, stores the response, and returns it.
+        via OutflowClient (forcing streaming unless the model is in `non_streaming_models`),
+        stores the response, and returns it.
         """
         if cached_entry is not None:
             self.log.info("Cache hit - replaying response for %s %s", cached_request.method, cached_request.path)
@@ -139,6 +146,24 @@ class Router:
         # Cache miss - forward to upstream
         assert self.outflow is not None
         self.log.info("Cache miss - forwarding to upstream for %s %s", cached_request.method, cached_request.path)
+
+        # Remember the client's original streaming preference
+        original_client_streaming = False
+        if cached_request.body and isinstance(cached_request.body, dict):
+            original_client_streaming = cached_request.body.get("stream", False)
+
+        # Force streaming on the upstream request unless the model is excluded
+        model_name = cached_request.body.get("model") if cached_request.body else None
+        should_force_streaming = model_name not in self.non_streaming_models if model_name else True
+
+        if should_force_streaming and cached_request.body is not None and isinstance(cached_request.body, dict):
+            cached_request.body["stream"] = True
+            # Also enable stream_options.include_usage so usage data is preserved
+            if "stream_options" not in cached_request.body:
+                cached_request.body["stream_options"] = {"include_usage": True}
+            elif isinstance(cached_request.body["stream_options"], dict):
+                cached_request.body["stream_options"]["include_usage"] = True
+            self.log.debug("Forced streaming=True for upstream request (client wanted streaming=%s)", original_client_streaming)
 
         response = await self.outflow.forward_request(cached_request)
 
@@ -150,6 +175,7 @@ class Router:
             model=model,
             temperature=temperature,
             prompt_hash=prompt_hash,
+            original_client_streaming=original_client_streaming,
         )
         cache_key = self.storage.put(entry)
         self.log.info("Recorded response with cache key %s", cache_key)

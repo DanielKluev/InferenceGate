@@ -70,12 +70,26 @@ class TestReplayMode:
             method="POST",
             path="/v1/chat/completions",
             headers={"content-type": "application/json"},
-            body={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Hello"
+                }]
+            },
         )
         response = CachedResponse(
             status_code=200,
             headers={"content-type": "application/json"},
-            body={"id": "chatcmpl-123", "choices": [{"message": {"role": "assistant", "content": "Hi!"}}]},
+            body={
+                "id": "chatcmpl-123",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hi!"
+                    }
+                }]
+            },
         )
         entry = CacheEntry(request=request, response=response, model="gpt-4")
         storage.put(entry)
@@ -99,7 +113,14 @@ class TestStreamingReplay:
             method="POST",
             path="/v1/chat/completions",
             headers={"content-type": "application/json"},
-            body={"model": "gpt-4", "messages": [{"role": "user", "content": "Stream test"}], "stream": True},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Stream test"
+                }],
+                "stream": True
+            },
         )
         chunks = [
             'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
@@ -118,9 +139,156 @@ class TestStreamingReplay:
         # Request streaming response
         resp = await replay_client.post(
             "/v1/chat/completions",
-            json={"model": "gpt-4", "messages": [{"role": "user", "content": "Stream test"}], "stream": True},
+            json={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Stream test"
+                }],
+                "stream": True
+            },
         )
         assert resp.status == 200
         content = await resp.text()
         assert "Hello" in content
         assert "World" in content
+
+
+class TestAdaptiveDelivery:
+    """Tests for adaptive streaming/non-streaming response delivery."""
+
+    async def test_non_streaming_client_gets_json_from_streaming_cassette(self, replay_client, replay_router):
+        """Test that a non-streaming client receives a reassembled JSON response from a streaming cassette."""
+        storage = replay_router.storage
+        # Store a streaming cassette (as the router would after forcing streaming)
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Adaptive test"
+                }],
+                "stream": True
+            },
+        )
+        chunks = [
+            'data: {"id":"chatcmpl-999","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl-999","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl-999","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4","choices":[{"index":0,"delta":{"content":" World"},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl-999","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+            'data: [DONE]\n\n',
+        ]
+        response = CachedResponse(status_code=200, headers={"content-type": "text/event-stream"}, chunks=chunks, is_streaming=True)
+        entry = CacheEntry(request=request, response=response, model="gpt-4")
+        storage.put(entry)
+
+        # Non-streaming client request (stream not set or stream=False)
+        resp = await replay_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Adaptive test"
+                }]
+            },
+        )
+        assert resp.status == 200
+        assert resp.content_type == "application/json"
+        data = await resp.json()
+        assert data["id"] == "chatcmpl-999"
+        assert data["object"] == "chat.completion"
+        assert data["choices"][0]["message"]["content"] == "Hello World"
+        assert data["choices"][0]["finish_reason"] == "stop"
+
+    async def test_streaming_client_gets_sse_from_streaming_cassette(self, replay_client, replay_router):
+        """Test that a streaming client receives SSE chunks from a streaming cassette."""
+        storage = replay_router.storage
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "SSE test"
+                }],
+                "stream": True
+            },
+        )
+        chunks = [
+            'data: {"id":"chatcmpl-888","choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n',
+            'data: [DONE]\n\n',
+        ]
+        response = CachedResponse(status_code=200, headers={"content-type": "text/event-stream"}, chunks=chunks, is_streaming=True)
+        entry = CacheEntry(request=request, response=response, model="gpt-4")
+        storage.put(entry)
+
+        # Streaming client request
+        resp = await replay_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "SSE test"
+                }],
+                "stream": True
+            },
+        )
+        assert resp.status == 200
+        assert resp.content_type == "text/event-stream"
+        text = await resp.text()
+        assert "chatcmpl-888" in text
+        assert "Hi" in text
+
+    async def test_backward_compat_non_streaming_cassette(self, replay_client, replay_router):
+        """Test that legacy non-streaming cassettes are still served correctly."""
+        storage = replay_router.storage
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Legacy test"
+                }]
+            },
+        )
+        response = CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={
+                "id": "chatcmpl-legacy",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Old style"
+                    }
+                }]
+            },
+            is_streaming=False,
+        )
+        entry = CacheEntry(request=request, response=response, model="gpt-4")
+        storage.put(entry)
+
+        resp = await replay_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Legacy test"
+                }]
+            },
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["id"] == "chatcmpl-legacy"
+        assert data["choices"][0]["message"]["content"] == "Old style"

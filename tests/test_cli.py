@@ -82,7 +82,7 @@ class TestTestGateCommand:
 
     def test_test_gate_help(self, runner):
         """
-        Test that test-gate --help shows correct options (host, port, model, prompt).
+        Test that test-gate --help shows correct options (host, port, model, prompt, stream).
         """
         result = runner.invoke(main, ["test-gate", "--help"])
         assert result.exit_code == 0
@@ -90,6 +90,8 @@ class TestTestGateCommand:
         assert "port" in result.output
         assert "model" in result.output
         assert "prompt" in result.output
+        assert "--stream" in result.output
+        assert "--no-stream" in result.output
         # Should NOT have api-key or upstream — those belong to test-upstream
         assert "api-key" not in result.output
         assert "upstream" not in result.output
@@ -100,6 +102,14 @@ class TestTestGateCommand:
         """
         # Use a port that shouldn't have anything running
         result = runner.invoke(main, ["test-gate", "--port", "19999"])
+        assert result.exit_code == 1
+        assert "Connection refused" in result.output
+
+    def test_test_gate_streaming_connection_refused(self, runner):
+        """
+        Test that test-gate --stream reports connection error when no instance is running.
+        """
+        result = runner.invoke(main, ["test-gate", "--port", "19999", "--stream"])
         assert result.exit_code == 1
         assert "Connection refused" in result.output
 
@@ -114,7 +124,7 @@ class TestTestUpstreamCommand:
 
     def test_test_upstream_help(self, runner):
         """
-        Test that test-upstream --help shows correct options (upstream, api-key, model, prompt).
+        Test that test-upstream --help shows correct options (upstream, api-key, model, prompt, stream).
         """
         result = runner.invoke(main, ["test-upstream", "--help"])
         assert result.exit_code == 0
@@ -122,12 +132,17 @@ class TestTestUpstreamCommand:
         assert "api-key" in result.output
         assert "model" in result.output
         assert "prompt" in result.output
+        assert "--stream" in result.output
+        assert "--no-stream" in result.output
 
-    def test_test_upstream_no_api_key_error(self, runner):
+    def test_test_upstream_no_api_key_error(self, runner, tmp_path):
         """
         Test that test-upstream command fails with helpful error when no API key provided.
         """
-        result = runner.invoke(main, ["test-upstream"])
+        # Use a temporary config file with no api_key to avoid picking up user's real config
+        config_path = tmp_path / "empty_config.yaml"
+        config_path.write_text("upstream: https://api.example.com\n")
+        result = runner.invoke(main, ["--config", str(config_path), "test-upstream"], env={"OPENAI_API_KEY": ""})
         assert result.exit_code == 1
         assert "No API key provided" in result.output
 

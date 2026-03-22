@@ -38,6 +38,10 @@ class Config(BaseModel):
     # Logging settings
     verbose: bool = Field(default=False, description="Enable verbose logging")
 
+    # Streaming settings
+    non_streaming_models: list[str] = Field(default_factory=list,
+                                            description="Models that do not support streaming and should not be forced to stream")
+
     # Test command settings
     test_prompt: str = Field(
         default='This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.',

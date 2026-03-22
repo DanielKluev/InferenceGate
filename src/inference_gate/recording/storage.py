@@ -36,6 +36,7 @@ class CacheEntry(BaseModel):
     model: str | None = None
     temperature: float | None = None
     prompt_hash: str | None = None
+    original_client_streaming: bool | None = None
 
 
 class CacheStorage:
@@ -50,8 +51,21 @@ class CacheStorage:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fields excluded from cache key computation so that streaming and
+    # non-streaming requests for the same prompt share the same entry.
+    _CACHE_KEY_EXCLUDED_FIELDS = {"stream", "stream_options"}
+
+    # Headers stripped from stored cassettes to prevent leaking credentials.
+    # Applied as a defense-in-depth measure in put() before writing to disk.
+    _SANITIZED_HEADERS = {"authorization", "x-api-key", "proxy-authorization"}
+
     def _compute_cache_key(self, request: CachedRequest) -> str:
         """Compute a unique cache key for a request.
+
+        The `stream` and `stream_options` fields are excluded from the request
+        body before hashing so that streaming and non-streaming requests for the
+        same prompt share the same cache entry (the router may inject these
+        fields when forcing streaming on the upstream request).
 
         Args:
             request: The request to compute key for
@@ -59,11 +73,19 @@ class CacheStorage:
         Returns:
             A unique hash string for this request
         """
+        # Build a body copy without streaming-related fields so that
+        # stream=True and stream=False requests resolve to the same key.
+        body_for_key = request.body
+        if body_for_key is not None and isinstance(body_for_key, dict):
+            excluded = self._CACHE_KEY_EXCLUDED_FIELDS
+            if excluded & body_for_key.keys():
+                body_for_key = {k: v for k, v in body_for_key.items() if k not in excluded}
+
         # Include relevant request data for caching
         key_data = {
             "method": request.method,
             "path": request.path,
-            "body": request.body,
+            "body": body_for_key,
         }
         key_string = json.dumps(key_data, sort_keys=True)
         return hashlib.sha256(key_string.encode()).hexdigest()[:32]
@@ -94,6 +116,10 @@ class CacheStorage:
     def put(self, entry: CacheEntry) -> str:
         """Store a cache entry.
 
+        Sensitive headers (Authorization, X-Api-Key, etc.) are stripped from
+        the stored request headers to prevent credential leakage in committed
+        cassettes.
+
         Args:
             entry: The cache entry to store
 
@@ -103,8 +129,13 @@ class CacheStorage:
         cache_key = self._compute_cache_key(entry.request)
         cache_file = self._get_cache_file(cache_key)
 
+        data = entry.model_dump()
+        # Strip sensitive headers from the stored request to prevent credential leakage
+        if data.get("request", {}).get("headers"):
+            data["request"]["headers"] = {k: v for k, v in data["request"]["headers"].items() if k.lower() not in self._SANITIZED_HEADERS}
+
         with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(entry.model_dump(), f, indent=2)
+            json.dump(data, f, indent=2)
 
         return cache_key
 

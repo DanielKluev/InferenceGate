@@ -36,9 +36,15 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
 ]
+test = [
+    "pytest>=7.0",
+]
 
 [project.scripts]
 inference-gate = "inference_gate.cli:main"
+
+[project.entry-points.pytest11]
+inferencegate = "inference_gate.pytest_plugin"
 
 [project.urls]
 Homepage = "https://github.com/DanielKluev/InferenceGate"

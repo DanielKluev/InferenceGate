@@ -4,6 +4,9 @@ import pytest
 
 from inference_gate.recording.storage import CacheStorage
 
+# Enable the pytester fixture for plugin integration tests
+pytest_plugins = ["pytester"]
+
 
 @pytest.fixture
 def temp_cache_dir(tmp_path):

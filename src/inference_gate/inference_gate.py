@@ -27,7 +27,7 @@ class InferenceGate:
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
                  upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
-                 web_ui_port: int = 8081) -> None:
+                 web_ui_port: int = 8081, non_streaming_models: list[str] | None = None) -> None:
         """
         Initialize InferenceGate with configuration.
 
@@ -38,6 +38,7 @@ class InferenceGate:
         `api_key` is the API key for upstream authentication.
         `web_ui` enables the optional web dashboard.
         `web_ui_port` is the port for the web UI server.
+        `non_streaming_models` is a list of model names that do not support streaming.
         """
         self.log = logging.getLogger("InferenceGate")
         self.host = host
@@ -48,6 +49,7 @@ class InferenceGate:
         self.api_key = api_key
         self.web_ui = web_ui
         self.web_ui_port = web_ui_port
+        self.non_streaming_models = non_streaming_models or []
 
         # Components (created during start)
         self._storage: CacheStorage | None = None
@@ -70,7 +72,7 @@ class InferenceGate:
         else:
             self._outflow = None
 
-        self._router = Router(mode=self.mode, storage=self._storage, outflow=self._outflow)
+        self._router = Router(mode=self.mode, storage=self._storage, outflow=self._outflow, non_streaming_models=self.non_streaming_models)
         self._server = InflowServer(host=self.host, port=self.port, router=self._router)
 
         # WebUIServer is optional
@@ -145,6 +147,28 @@ class InferenceGate:
             pass
         finally:
             await self.stop()
+
+    @property
+    def actual_port(self) -> int:
+        """
+        Get the actual port the inflow server is listening on.
+
+        When started with port 0, the OS assigns an ephemeral port.
+        This property returns that actual port after `start()` has been called.
+        Falls back to the configured port if the server is not yet started.
+        """
+        if self._server is not None:
+            return self._server.actual_port
+        return self.port
+
+    @property
+    def base_url(self) -> str:
+        """
+        Get the base URL of the running InferenceGate proxy.
+
+        Returns a URL like `http://127.0.0.1:54321` using the actual port.
+        """
+        return f"http://{self.host}:{self.actual_port}"
 
     @property
     def storage(self) -> CacheStorage | None:

@@ -14,6 +14,7 @@ from typing import Any
 
 from aiohttp import web
 
+from inference_gate.recording.reassembly import reassemble_streaming_response
 from inference_gate.recording.storage import CachedResponse
 from inference_gate.router.router import Router
 
@@ -65,6 +66,21 @@ class InflowServer:
         await self._site.start()
         self.log.info("InflowServer started on http://%s:%d", self.host, self.port)
 
+    @property
+    def actual_port(self) -> int:
+        """
+        Get the actual port the server is listening on.
+
+        When the server was started with port 0, the OS assigns an ephemeral port.
+        This property returns that actual port. Falls back to the configured port
+        if the server is not yet started.
+        """
+        if self._site is not None and self._site._server is not None:
+            sockets = self._site._server.sockets
+            if sockets:
+                return sockets[0].getsockname()[1]
+        return self.port
+
     async def stop(self) -> None:
         """
         Stop the HTTP server and clean up resources.
@@ -89,8 +105,9 @@ class InflowServer:
         """
         Handle all proxied API requests.
 
-        Parses the incoming request, delegates to the Router,
-        and builds the appropriate HTTP response.
+        Parses the incoming request, extracts the client's streaming preference,
+        delegates to the Router, and builds the appropriate HTTP response
+        adapting the response format to match the client's original `stream` setting.
         """
         method = request.method
         path = f"/{request.match_info['path']}"
@@ -106,31 +123,43 @@ class InflowServer:
             except (json.JSONDecodeError, ValueError):
                 body = None
 
+        # Extract client's streaming preference BEFORE routing (router may modify body)
+        client_wants_streaming = False
+        if body and isinstance(body, dict):
+            client_wants_streaming = body.get("stream", False)
+
         # Parse query parameters
         query_params: dict[str, str] | None = None
         if request.query_string:
             query_params = dict(request.query)
 
         # Route the request
-        self.log.debug("Received %s %s", method, path)
+        self.log.debug("Received %s %s (client_streaming=%s)", method, path, client_wants_streaming)
         cached_response = await self.router.route_request(method=method, path=path, headers=headers, body=body, query_params=query_params)
 
-        # Build and return the response
-        return self._build_response(cached_response)
+        # Build and return the response, adapting to client's streaming preference
+        return self._build_response(cached_response, client_wants_streaming, path)
 
-    def _build_response(self, cached_response: CachedResponse) -> web.Response:
+    def _build_response(self, cached_response: CachedResponse, client_wants_streaming: bool = False, path: str = "") -> web.Response:
         """
         Build an aiohttp Response from a CachedResponse.
 
-        Handles both streaming (SSE) and standard JSON responses.
+        Adapts the response format to match the client's original `stream` preference:
+        - Client wants streaming + cassette is streaming → return SSE chunks
+        - Client wants non-streaming + cassette is streaming → reassemble into JSON
+        - Cassette is non-streaming → return JSON body (backward compat)
         """
         if cached_response.is_streaming and cached_response.chunks:
-            # Reconstruct the streaming response as a single body
-            # For replay, we send all chunks concatenated
-            body_bytes = "".join(cached_response.chunks).encode("utf-8")
-            return web.Response(body=body_bytes, status=cached_response.status_code, content_type="text/event-stream")
+            if client_wants_streaming:
+                # Client wants streaming – send all SSE chunks concatenated
+                body_bytes = "".join(cached_response.chunks).encode("utf-8")
+                return web.Response(body=body_bytes, status=cached_response.status_code, content_type="text/event-stream")
+            else:
+                # Client wants non-streaming – reassemble streaming chunks into JSON
+                reassembled = reassemble_streaming_response(cached_response.chunks, path)
+                return web.json_response(data=reassembled, status=cached_response.status_code)
 
-        # Standard JSON response
+        # Standard JSON response (non-streaming cassette or backward compat)
         if cached_response.body is not None:
             return web.json_response(data=cached_response.body, status=cached_response.status_code)
 

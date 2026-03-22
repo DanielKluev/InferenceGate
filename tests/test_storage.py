@@ -36,12 +36,22 @@ class TestCacheStorage:
             method="POST",
             path="/v1/chat/completions",
             headers={"content-type": "application/json"},
-            body={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Hello"
+                }]
+            },
         )
         response = CachedResponse(
             status_code=200,
             headers={"content-type": "application/json"},
-            body={"choices": [{"message": {"content": "Hi there!"}}]},
+            body={"choices": [{
+                "message": {
+                    "content": "Hi there!"
+                }
+            }]},
         )
         entry = CacheEntry(request=request, response=response, model="gpt-4", temperature=0.7)
 
@@ -100,8 +110,14 @@ class TestCacheStorage:
     def test_compute_prompt_hash(self):
         """Test that prompt hash is deterministic and different for different inputs."""
         messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hello"},
+            {
+                "role": "system",
+                "content": "You are helpful."
+            },
+            {
+                "role": "user",
+                "content": "Hello"
+            },
         ]
         hash1 = CacheStorage.compute_prompt_hash(messages)
         hash2 = CacheStorage.compute_prompt_hash(messages)
@@ -127,3 +143,122 @@ class TestCacheStorage:
         assert retrieved is not None
         assert retrieved.response.is_streaming
         assert len(retrieved.response.chunks) == 3
+
+    def test_cache_key_ignores_stream_field(self, storage):
+        """Test that stream=True and stream=False requests share the same cache key."""
+        body_streaming = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True}
+        body_non_streaming = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False}
+        body_no_stream = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}
+
+        req_streaming = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_streaming)
+        req_non_streaming = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_non_streaming)
+        req_no_stream = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_no_stream)
+
+        key1 = storage._compute_cache_key(req_streaming)
+        key2 = storage._compute_cache_key(req_non_streaming)
+        key3 = storage._compute_cache_key(req_no_stream)
+
+        assert key1 == key2, "stream=True and stream=False should produce the same cache key"
+        assert key1 == key3, "stream=True and no stream field should produce the same cache key"
+
+    def test_cache_key_differs_for_different_content(self, storage):
+        """Test that different prompt content produces different cache keys even after stream stripping."""
+        body1 = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True}
+        body2 = {"model": "gpt-4", "messages": [{"role": "user", "content": "Goodbye"}], "stream": True}
+
+        req1 = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body1)
+        req2 = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body2)
+
+        assert storage._compute_cache_key(req1) != storage._compute_cache_key(req2)
+
+    def test_streaming_request_hits_non_streaming_cache(self, storage):
+        """Test that a streaming request can find a cassette stored by a non-streaming request (same cache key)."""
+        # Store with stream=True and stream_options (as recorded by forced-streaming router)
+        request_stored = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Test"
+                }],
+                "stream": True,
+                "stream_options": {
+                    "include_usage": True
+                },
+            },
+        )
+        response = CachedResponse(status_code=200, headers={}, chunks=["data: chunk\n\n"], is_streaming=True)
+        entry = CacheEntry(request=request_stored, response=response)
+        storage.put(entry)
+
+        # Look up with stream=False body (as the non-streaming client would send)
+        request_lookup = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Test"
+                }],
+                "stream": False
+            },
+        )
+        retrieved = storage.get(request_lookup)
+        assert retrieved is not None
+        assert retrieved.response.is_streaming
+
+        # Also look up with NO stream field at all (as a plain client would send)
+        request_plain = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Test"
+                }],
+            },
+        )
+        retrieved2 = storage.get(request_plain)
+        assert retrieved2 is not None
+        assert retrieved2.response.is_streaming
+
+    def test_cache_key_ignores_stream_options_field(self, storage):
+        """Test that stream_options field is excluded from cache key computation."""
+        body_with = {
+            "model": "gpt-4",
+            "messages": [{
+                "role": "user",
+                "content": "Hello"
+            }],
+            "stream": True,
+            "stream_options": {
+                "include_usage": True
+            },
+        }
+        body_without = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}
+
+        req_with = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_with)
+        req_without = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_without)
+
+        key_with = storage._compute_cache_key(req_with)
+        key_without = storage._compute_cache_key(req_without)
+
+        assert key_with == key_without, "stream_options should be excluded from cache key"
+
+    def test_original_client_streaming_metadata(self, storage):
+        """Test that original_client_streaming metadata is stored and retrieved correctly."""
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "stream": True})
+        response = CachedResponse(status_code=200, headers={}, chunks=["data: test\n\n"], is_streaming=True)
+        entry = CacheEntry(request=request, response=response, original_client_streaming=False)
+        storage.put(entry)
+
+        retrieved = storage.get(request)
+        assert retrieved is not None
+        assert retrieved.original_client_streaming is False

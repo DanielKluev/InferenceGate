@@ -49,3 +49,4 @@ Routes requests between inflow, cache, and outflow.
 Handles caching and storage of inference data.
 
 - `storage.py` - File-based cache storage
+- `reassembly.py` - Reassembles streaming SSE chunks into non-streaming JSON responses for adaptive playback

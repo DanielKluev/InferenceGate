@@ -13,6 +13,7 @@ Command-line options override configuration file values.
 
 import asyncio
 import logging
+from typing import Any
 
 import aiohttp
 import click
@@ -260,7 +261,8 @@ def cache_info(ctx: click.Context, cache_dir: str | None) -> None:
 # =============================================================================
 
 
-async def _send_test_prompt(url: str, headers: dict[str, str], model: str, prompt: str, verbose: bool) -> tuple[bool, str]:
+async def _send_test_prompt(url: str, headers: dict[str, str], model: str, prompt: str, verbose: bool,
+                           stream: bool = False) -> tuple[bool, str]:
     """
     Send a test prompt to a Chat Completions endpoint.
 
@@ -268,15 +270,18 @@ async def _send_test_prompt(url: str, headers: dict[str, str], model: str, promp
     `headers` is a dict of HTTP headers to include.
     `model` is the model name to request.
     `prompt` is the user message to send.
+    `stream` enables streaming mode (SSE) for the request.
 
     Returns a tuple of (success, response_text).
     """
     setup_logging(verbose)
     log = logging.getLogger("TestCommand")
 
-    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 50}
+    payload: dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 50}
+    if stream:
+        payload["stream"] = True
 
-    log.debug("Sending test request to %s", url)
+    log.debug("Sending test request to %s (stream=%s)", url, stream)
     log.debug("Using model: %s", model)
 
     timeout = aiohttp.ClientTimeout(total=60)
@@ -287,18 +292,71 @@ async def _send_test_prompt(url: str, headers: dict[str, str], model: str, promp
                     error_text = await resp.text()
                     return False, f"HTTP {resp.status}: {error_text}"
 
-                data = await resp.json()
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0].get("message", {}).get("content", "")
-                    return True, content.strip()
+                if stream:
+                    return await _read_streaming_response(resp, log)
                 else:
-                    return False, f"Unexpected response format: {data}"
+                    return await _read_standard_response(resp)
         except aiohttp.ClientConnectorError as e:
             return False, f"Connection refused: {e}"
         except aiohttp.ClientError as e:
             return False, f"Connection error: {e}"
         except Exception as e:
             return False, f"Error: {e}"
+
+
+async def _read_standard_response(resp: aiohttp.ClientResponse) -> tuple[bool, str]:
+    """
+    Read a standard (non-streaming) Chat Completions response.
+
+    Returns a tuple of (success, response_text).
+    """
+    data = await resp.json()
+    if "choices" in data and len(data["choices"]) > 0:
+        content = data["choices"][0].get("message", {}).get("content") or ""
+        return True, content.strip()
+    else:
+        return False, f"Unexpected response format: {data}"
+
+
+async def _read_streaming_response(resp: aiohttp.ClientResponse, log: logging.Logger) -> tuple[bool, str]:
+    """
+    Read a streaming (SSE) Chat Completions response and reassemble the content.
+
+    Parses `data:` lines from the SSE stream and concatenates content deltas.
+
+    Returns a tuple of (success, assembled_content).
+    """
+    import json
+    content_parts: list[str] = []
+    chunk_count = 0
+
+    async for raw_chunk in resp.content.iter_any():
+        text = raw_chunk.decode("utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[len("data:"):].strip()
+            if data_str == "[DONE]":
+                continue
+            try:
+                event = json.loads(data_str)
+                chunk_count += 1
+                for choice in event.get("choices", []):
+                    delta = choice.get("delta", {})
+                    if "content" in delta and delta["content"] is not None:
+                        content_parts.append(delta["content"])
+            except (json.JSONDecodeError, ValueError):
+                log.debug("Skipping non-JSON SSE line: %s", data_str[:80])
+
+    log.debug("Received %d streaming chunks", chunk_count)
+    if content_parts:
+        return True, "".join(content_parts).strip()
+    elif chunk_count > 0:
+        # Got chunks but no content (e.g. tool call only) — still a success
+        return True, "(streaming response received, no text content)"
+    else:
+        return False, "No streaming chunks received"
 
 
 def _print_test_result(success: bool, response: str, ctx: click.Context) -> None:
@@ -322,9 +380,11 @@ def _print_test_result(success: bool, response: str, ctx: click.Context) -> None
 @click.option("--port", "-p", default=None, type=int, help="Port of the running InferenceGate instance")
 @click.option("--model", "-m", default=None, help="Model to use for the test (default: gpt-4o-mini)")
 @click.option("--prompt", default=None, help="Custom prompt to send")
+@click.option("--stream/--no-stream", default=False, help="Enable or disable streaming mode (default: non-streaming)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
-def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None, verbose: bool | None) -> None:
+def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None, stream: bool,
+             verbose: bool | None) -> None:
     """
     Test a running InferenceGate instance.
 
@@ -333,6 +393,8 @@ def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str
     from the configuration, so you don't need to pass them explicitly.
 
     No API key is needed — the running instance already has it configured.
+
+    Use --stream to test streaming (SSE) responses, --no-stream (default) for standard JSON responses.
 
     Command-line options override configuration file values.
     """
@@ -350,8 +412,9 @@ def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str
 
     click.echo(f"Testing InferenceGate at http://{actual_host}:{actual_port}...")
     click.echo(f"Using model: {actual_model}")
+    click.echo(f"Streaming: {stream}")
 
-    success, response = asyncio.run(_send_test_prompt(gate_url, headers, actual_model, actual_prompt, actual_verbose))
+    success, response = asyncio.run(_send_test_prompt(gate_url, headers, actual_model, actual_prompt, actual_verbose, stream=stream))
     _print_test_result(success, response, ctx)
 
 
@@ -360,15 +423,18 @@ def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str
 @click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key")
 @click.option("--model", "-m", default=None, help="Model to use for the test (default: gpt-4o-mini)")
 @click.option("--prompt", default=None, help="Custom prompt to send")
+@click.option("--stream/--no-stream", default=False, help="Enable or disable streaming mode (default: non-streaming)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
-def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None, model: str | None, prompt: str | None,
-                  verbose: bool | None) -> None:
+def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None, model: str | None, prompt: str | None, stream: bool,
+                 verbose: bool | None) -> None:
     """
     Test the connection to the upstream API directly.
 
     Sends a test prompt directly to the upstream API (bypassing InferenceGate)
     to verify that the API key and endpoint are working correctly.
+
+    Use --stream to test streaming (SSE) responses, --no-stream (default) for standard JSON responses.
 
     Command-line options override configuration file values.
     """
@@ -391,8 +457,9 @@ def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None,
 
     click.echo(f"Testing upstream API at {actual_upstream}...")
     click.echo(f"Using model: {actual_model}")
+    click.echo(f"Streaming: {stream}")
 
-    success, response = asyncio.run(_send_test_prompt(url, headers, actual_model, actual_prompt, actual_verbose))
+    success, response = asyncio.run(_send_test_prompt(url, headers, actual_model, actual_prompt, actual_verbose, stream=stream))
     _print_test_result(success, response, ctx)
 
 

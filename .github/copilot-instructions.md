@@ -8,7 +8,7 @@ This file helps a code-writing agent onboard the pyFade repository quickly. It c
 
 `InferenceGate` is a Python library designed to facilitate efficient and convenient AI inference replay for testing, debugging, and development purposes. It provides tools to capture, store, and replay AI model inferences, enabling developers to simulate various scenarios and validate model behavior without the need for repeated live inferences. This is particularly useful for debugging complex AI systems, conducting regression tests, and optimizing model performance in a controlled environment.
 
-At it's core it is a HTTP proxy server that accepts OpenAI-compatible Responses API and Chat Completions API requests, then routes them to either a real AI model endpoint or to a local replay database, based on user-defined rules and configurations.
+At it's core it is a HTTP proxy server that accepts OpenAI-compatible Responses API and Chat Completions API requests, then routes them to either a real AI model endpoint or to a local replay database (locally stored cassettes with recorded AI inference sessions), based on user-defined rules and configurations.
 
 Additionally, there's an option to filter and block requests based on keywords or patterns, enhancing security and compliance during inference operations.
 
