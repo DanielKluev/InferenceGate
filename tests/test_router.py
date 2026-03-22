@@ -377,3 +377,199 @@ class TestForceStreaming:
         )
 
         mock_outflow.forward_request.assert_not_called()
+
+
+class TestFuzzyModelMatching:
+    """Tests for the fuzzy model matching behavior."""
+
+    async def test_fuzzy_disabled_by_default(self, storage):
+        """Test that fuzzy model matching is disabled by default."""
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage)
+        assert router.fuzzy_model_matching is False
+
+    async def test_fuzzy_enabled_via_constructor(self, storage):
+        """Test that fuzzy model matching can be enabled via constructor."""
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage, fuzzy_model_matching=True)
+        assert router.fuzzy_model_matching is True
+
+    async def test_fuzzy_match_replay_only_returns_cached(self, storage):
+        """Test that fuzzy matching returns cached response from a different model in replay-only mode."""
+        # Store entry with model-a
+        messages = [{"role": "user", "content": "Hello fuzzy"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-a",
+                "messages": messages
+            },
+        )
+        cached_resp = CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={
+                "id": "chatcmpl-fuzzy",
+                "choices": [{
+                    "message": {
+                        "content": "Hi from model-a!"
+                    }
+                }]
+            },
+        )
+        entry = CacheEntry(request=request, response=cached_resp, model="model-a", prompt_hash=prompt_hash)
+        storage.put(entry)
+
+        # Request with model-b and fuzzy matching enabled
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage, fuzzy_model_matching=True)
+        response = await router.route_request(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-b",
+                "messages": messages
+            },
+        )
+        assert response.status_code == 200
+        assert response.body["id"] == "chatcmpl-fuzzy"
+
+    async def test_fuzzy_match_disabled_returns_503(self, storage):
+        """Test that without fuzzy matching, a cache miss with different model returns 503."""
+        # Store entry with model-a
+        messages = [{"role": "user", "content": "Hello no-fuzzy"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-a",
+                "messages": messages
+            },
+        )
+        cached_resp = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Hi!"}}]})
+        entry = CacheEntry(request=request, response=cached_resp, model="model-a", prompt_hash=prompt_hash)
+        storage.put(entry)
+
+        # Request with model-b but fuzzy matching disabled (default)
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage, fuzzy_model_matching=False)
+        response = await router.route_request(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-b",
+                "messages": messages
+            },
+        )
+        assert response.status_code == 503
+
+    async def test_exact_match_preferred_over_fuzzy(self, storage):
+        """Test that an exact cache key match is preferred over fuzzy model matching."""
+        messages = [{"role": "user", "content": "Exact vs fuzzy"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+
+        # Store entry with model-a
+        request_a = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-a",
+                "messages": messages
+            },
+        )
+        resp_a = CachedResponse(status_code=200, headers={}, body={"id": "from-model-a", "choices": [{"message": {"content": "A"}}]})
+        entry_a = CacheEntry(request=request_a, response=resp_a, model="model-a", prompt_hash=prompt_hash)
+        storage.put(entry_a)
+
+        # Store entry with model-b
+        request_b = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-b",
+                "messages": messages
+            },
+        )
+        resp_b = CachedResponse(status_code=200, headers={}, body={"id": "from-model-b", "choices": [{"message": {"content": "B"}}]})
+        entry_b = CacheEntry(request=request_b, response=resp_b, model="model-b", prompt_hash=prompt_hash)
+        storage.put(entry_b)
+
+        # Request with model-b should return the exact match, not the fuzzy match from model-a
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage, fuzzy_model_matching=True)
+        response = await router.route_request(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-b",
+                "messages": messages
+            },
+        )
+        assert response.status_code == 200
+        assert response.body["id"] == "from-model-b"
+
+    async def test_fuzzy_match_record_and_replay_returns_cached(self, storage, mock_outflow):
+        """Test that fuzzy matching works in record-and-replay mode (avoids upstream call)."""
+        messages = [{"role": "user", "content": "Hello record fuzzy"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+
+        # Store entry with model-a
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-a",
+                "messages": messages
+            },
+        )
+        cached_resp = CachedResponse(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            chunks=['data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n', 'data: [DONE]\n\n'],
+            is_streaming=True,
+        )
+        entry = CacheEntry(request=request, response=cached_resp, model="model-a", prompt_hash=prompt_hash)
+        storage.put(entry)
+
+        # Request with model-b and fuzzy matching enabled
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow, fuzzy_model_matching=True)
+        response = await router.route_request(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "model-b",
+                "messages": messages
+            },
+        )
+        # Should use the fuzzy match, not forward to upstream
+        assert response.is_streaming
+        mock_outflow.forward_request.assert_not_called()
+
+    async def test_fuzzy_match_no_messages_in_body(self, storage):
+        """Test that fuzzy matching gracefully handles requests without messages."""
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage, fuzzy_model_matching=True)
+        response = await router.route_request(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={"model": "gpt-4"},
+        )
+        # No messages → no prompt hash → should return 503 (no fuzzy match possible)
+        assert response.status_code == 503
+
+    async def test_fuzzy_match_no_body(self, storage):
+        """Test that fuzzy matching gracefully handles requests without a body."""
+        router = Router(mode=Mode.REPLAY_ONLY, storage=storage, fuzzy_model_matching=True)
+        response = await router.route_request(
+            method="GET",
+            path="/v1/models",
+            headers={},
+        )
+        assert response.status_code == 503

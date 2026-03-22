@@ -42,6 +42,11 @@ class Config(BaseModel):
     non_streaming_models: list[str] = Field(default_factory=list,
                                             description="Models that do not support streaming and should not be forced to stream")
 
+    # Fuzzy model matching
+    fuzzy_model_matching: bool = Field(
+        default=False, description="Enable fuzzy model matching: on cache miss, look for entries with the same prompt "
+        "but a different model")
+
     # Test command settings
     test_prompt: str = Field(
         default='This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.',

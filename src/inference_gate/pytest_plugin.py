@@ -70,16 +70,23 @@ _OPTION_DEFS: dict[str, dict[str, Any]] = {
         "ini": "inferencegate_port",
         "default": "0",
     },
+    "fuzzy_model_matching": {
+        "cli": "inferencegate_fuzzy_model_matching",
+        "env": "INFERENCEGATE_FUZZY_MODEL_MATCHING",
+        "ini": "inferencegate_fuzzy_model_matching",
+        "default": None,
+    },
 }
 
 
-def _resolve_option(config: pytest.Config, name: str) -> str | None:
+def _resolve_option(config: pytest.Config, name: str) -> str | bool | None:
     """
     Resolve an InferenceGate option using CLI > env var > ini > default.
 
     `name` is a key in ``_OPTION_DEFS`` (e.g. ``"mode"``, ``"cache_dir"``).
-    Returns the resolved string value, or None if no value is set and the
-    default is None.
+    Returns the resolved value, or None if no value is set and the
+    default is None.  Boolean CLI flags (e.g. ``fuzzy_model_matching``)
+    may return ``bool`` directly.
     """
     defn = _OPTION_DEFS[name]
 
@@ -118,11 +125,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption("--inferencegate-cache-dir", default=None, help="Directory for cached cassettes (default: tests/cassettes).")
     group.addoption("--inferencegate-config", default=None, help="Path to InferenceGate config.yaml (default: auto-detect).")
     group.addoption("--inferencegate-port", default=None, help="Proxy server port. 0 = OS-assigned (default: 0).")
+    group.addoption("--inferencegate-fuzzy-model-matching", action="store_true", dest="inferencegate_fuzzy_model_matching", default=None,
+                    help="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model.")
+    group.addoption("--no-inferencegate-fuzzy-model-matching", action="store_false", dest="inferencegate_fuzzy_model_matching",
+                    default=None, help="Disable fuzzy model matching, overriding ini/env settings for a single test run.")
 
     parser.addini("inferencegate_mode", default="", help="InferenceGate operating mode: replay or record.")
     parser.addini("inferencegate_cache_dir", default="", help="Directory for cached cassettes.")
     parser.addini("inferencegate_config", default="", help="Path to InferenceGate config.yaml.")
     parser.addini("inferencegate_port", default="", help="Proxy server port. 0 = OS-assigned.")
+    parser.addini("inferencegate_fuzzy_model_matching", default="", help="Enable fuzzy model matching (true/false).")
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -238,6 +250,13 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
     config_path = _resolve_option(config, "config")
     port_str = _resolve_option(config, "port") or "0"
     port = int(port_str)
+    fuzzy_raw = _resolve_option(config, "fuzzy_model_matching")
+    if isinstance(fuzzy_raw, bool):
+        fuzzy_model_matching = fuzzy_raw
+    elif fuzzy_raw is not None:
+        fuzzy_model_matching = str(fuzzy_raw).lower() in ("true", "1", "yes")
+    else:
+        fuzzy_model_matching = False
 
     # Map user-facing mode names to internal Mode enum
     if mode_str == "record":
@@ -260,7 +279,7 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
             log.warning("Could not load InferenceGate config file; using defaults for record mode")
 
     gate = InferenceGate(host="127.0.0.1", port=port, mode=mode, cache_dir=cache_dir, upstream_base_url=upstream_base_url, api_key=api_key,
-                         non_streaming_models=non_streaming_models)
+                         non_streaming_models=non_streaming_models, fuzzy_model_matching=fuzzy_model_matching)
 
     server_thread = _ServerThread(gate)
     server_thread.start()

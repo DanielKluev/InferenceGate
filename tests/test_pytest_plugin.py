@@ -17,7 +17,6 @@ import pytest
 # Path to the production cassettes shipped with InferenceGate's own tests
 CASSETTES_DIR = str(Path(__file__).parent / "cassettes")
 
-
 # ---------------------------------------------------------------------------
 # Unit tests for _resolve_option
 # ---------------------------------------------------------------------------
@@ -207,7 +206,8 @@ class TestCassetteReplayViaPytestPlugin:
 
     def test_replay_ok_prompt(self, pytester):
         """Replay the 'OK' prompt cassette through the plugin's server."""
-        pytester.makepyfile(textwrap.dedent(f"""
+        pytester.makepyfile(
+            textwrap.dedent(f"""
             import http.client
             import json
             import urllib.parse
@@ -243,7 +243,8 @@ class TestCassetteReplayViaPytestPlugin:
 
     def test_cache_miss_returns_503(self, pytester):
         """A request with no matching cassette should return 503 in replay mode."""
-        pytester.makepyfile(textwrap.dedent(f"""
+        pytester.makepyfile(
+            textwrap.dedent(f"""
             import http.client
             import json
             import urllib.parse
@@ -267,6 +268,145 @@ class TestCassetteReplayViaPytestPlugin:
             inferencegate_cache_dir = {CASSETTES_DIR}
         """)
         result = pytester.runpytest("-v", "-s")
+        result.assert_outcomes(passed=1)
+
+
+class TestFuzzyModelMatchingViaPytestPlugin:
+    """Tests for the fuzzy model matching option via the pytest plugin."""
+
+    def test_fuzzy_matching_via_ini_option(self, pytester):
+        """Fuzzy model matching enabled via ini finds a cassette recorded with a different model."""
+        pytester.makepyfile(
+            textwrap.dedent(f"""
+            import http.client
+            import json
+            import urllib.parse
+
+            OK_PROMPT = 'This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.'
+
+            def test_fuzzy(inference_gate_url):
+                parsed = urllib.parse.urlparse(inference_gate_url)
+                conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+                body = json.dumps({{
+                    "model": "completely-different-model",
+                    "messages": [{{"role": "user", "content": OK_PROMPT}}],
+                    "max_tokens": 50,
+                }})
+                conn.request("POST", "/v1/chat/completions",
+                             body=body,
+                             headers={{"Content-Type": "application/json"}})
+                resp = conn.getresponse()
+                assert resp.status == 200
+                data = json.loads(resp.read())
+                assert "choices" in data
+                conn.close()
+        """))
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+            inferencegate_fuzzy_model_matching = true
+        """)
+        result = pytester.runpytest("-v", "-s")
+        result.assert_outcomes(passed=1)
+
+    def test_fuzzy_matching_via_cli_flag(self, pytester):
+        """Fuzzy model matching enabled via CLI flag finds a cassette recorded with a different model."""
+        pytester.makepyfile(
+            textwrap.dedent(f"""
+            import http.client
+            import json
+            import urllib.parse
+
+            OK_PROMPT = 'This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.'
+
+            def test_fuzzy(inference_gate_url):
+                parsed = urllib.parse.urlparse(inference_gate_url)
+                conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+                body = json.dumps({{
+                    "model": "another-nonexistent-model",
+                    "messages": [{{"role": "user", "content": OK_PROMPT}}],
+                    "max_tokens": 50,
+                }})
+                conn.request("POST", "/v1/chat/completions",
+                             body=body,
+                             headers={{"Content-Type": "application/json"}})
+                resp = conn.getresponse()
+                assert resp.status == 200
+                data = json.loads(resp.read())
+                assert "choices" in data
+                conn.close()
+        """))
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+        """)
+        result = pytester.runpytest("-v", "-s", "--inferencegate-fuzzy-model-matching")
+        result.assert_outcomes(passed=1)
+
+    def test_fuzzy_matching_via_env_var(self, pytester, monkeypatch):
+        """Fuzzy model matching enabled via environment variable finds a cassette recorded with a different model."""
+        monkeypatch.setenv("INFERENCEGATE_FUZZY_MODEL_MATCHING", "true")
+        pytester.makepyfile(
+            textwrap.dedent(f"""
+            import http.client
+            import json
+            import urllib.parse
+
+            OK_PROMPT = 'This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.'
+
+            def test_fuzzy(inference_gate_url):
+                parsed = urllib.parse.urlparse(inference_gate_url)
+                conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+                body = json.dumps({{
+                    "model": "env-var-test-model",
+                    "messages": [{{"role": "user", "content": OK_PROMPT}}],
+                    "max_tokens": 50,
+                }})
+                conn.request("POST", "/v1/chat/completions",
+                             body=body,
+                             headers={{"Content-Type": "application/json"}})
+                resp = conn.getresponse()
+                assert resp.status == 200
+                conn.close()
+        """))
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+        """)
+        result = pytester.runpytest("-v", "-s")
+        result.assert_outcomes(passed=1)
+
+    def test_no_fuzzy_matching_cli_overrides_ini(self, pytester):
+        """--no-inferencegate-fuzzy-model-matching CLI flag overrides ini=true, returning 503 on model mismatch."""
+        pytester.makepyfile(
+            textwrap.dedent(f"""
+            import http.client
+            import json
+            import urllib.parse
+
+            OK_PROMPT = 'This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.'
+
+            def test_no_fuzzy(inference_gate_url):
+                parsed = urllib.parse.urlparse(inference_gate_url)
+                conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+                body = json.dumps({{
+                    "model": "nonexistent-model",
+                    "messages": [{{"role": "user", "content": OK_PROMPT}}],
+                    "max_tokens": 50,
+                }})
+                conn.request("POST", "/v1/chat/completions",
+                             body=body,
+                             headers={{"Content-Type": "application/json"}})
+                resp = conn.getresponse()
+                assert resp.status == 503
+                conn.close()
+        """))
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+            inferencegate_fuzzy_model_matching = true
+        """)
+        result = pytester.runpytest("-v", "-s", "--no-inferencegate-fuzzy-model-matching")
         result.assert_outcomes(passed=1)
 
 
@@ -338,11 +478,18 @@ class TestHeaderSanitization:
         """Authorization header should be removed from stored cassettes."""
         from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry
         entry = CacheEntry(
-            request=CachedRequest(method="POST", path="/v1/chat/completions", headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer sk-secret-key-12345",
-                "Accept": "*/*",
-            }, body={"model": "test", "messages": [{"role": "user", "content": "hello"}]}),
+            request=CachedRequest(
+                method="POST", path="/v1/chat/completions", headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer sk-secret-key-12345",
+                    "Accept": "*/*",
+                }, body={
+                    "model": "test",
+                    "messages": [{
+                        "role": "user",
+                        "content": "hello"
+                    }]
+                }),
             response=CachedResponse(status_code=200, headers={"Content-Type": "application/json"}, body={"choices": []}),
         )
         cache_key = storage.put(entry)
@@ -362,11 +509,18 @@ class TestHeaderSanitization:
         """X-Api-Key and Proxy-Authorization should also be stripped."""
         from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry
         entry = CacheEntry(
-            request=CachedRequest(method="POST", path="/v1/chat/completions", headers={
-                "Content-Type": "application/json",
-                "X-Api-Key": "secret",
-                "Proxy-Authorization": "Basic secret",
-            }, body={"model": "test", "messages": [{"role": "user", "content": "test"}]}),
+            request=CachedRequest(
+                method="POST", path="/v1/chat/completions", headers={
+                    "Content-Type": "application/json",
+                    "X-Api-Key": "secret",
+                    "Proxy-Authorization": "Basic secret",
+                }, body={
+                    "model": "test",
+                    "messages": [{
+                        "role": "user",
+                        "content": "test"
+                    }]
+                }),
             response=CachedResponse(status_code=200, headers={"Content-Type": "application/json"}, body={"choices": []}),
         )
         cache_key = storage.put(entry)
@@ -388,7 +542,13 @@ class TestHeaderSanitization:
             request=CachedRequest(method="POST", path="/v1/chat/completions", headers={
                 "content-type": "application/json",
                 "AUTHORIZATION": "Bearer secret",
-            }, body={"model": "test", "messages": [{"role": "user", "content": "test2"}]}),
+            }, body={
+                "model": "test",
+                "messages": [{
+                    "role": "user",
+                    "content": "test2"
+                }]
+            }),
             response=CachedResponse(status_code=200, headers={"Content-Type": "application/json"}, body={"choices": []}),
         )
         cache_key = storage.put(entry)

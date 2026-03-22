@@ -30,7 +30,7 @@ class Router:
     """
 
     def __init__(self, mode: Mode, storage: CacheStorage, outflow: OutflowClient | None = None,
-                 non_streaming_models: list[str] | None = None) -> None:
+                 non_streaming_models: list[str] | None = None, fuzzy_model_matching: bool = False) -> None:
         """
         Initialize the router.
 
@@ -39,12 +39,15 @@ class Router:
         `outflow` is the client for forwarding to upstream (required for RECORD_AND_REPLAY mode).
         `non_streaming_models` is a list of model names that do not support streaming
         and should not be forced to stream.
+        `fuzzy_model_matching` enables fallback to cache entries with the same prompt
+        but a different model when the exact cache key is not found.
         """
         self.log = logging.getLogger("Router")
         self.mode = mode
         self.storage = storage
         self.outflow = outflow
         self.non_streaming_models = non_streaming_models or []
+        self.fuzzy_model_matching = fuzzy_model_matching
 
         if mode == Mode.RECORD_AND_REPLAY and outflow is None:
             raise ValueError("OutflowClient is required for RECORD_AND_REPLAY mode")
@@ -55,15 +58,21 @@ class Router:
         Route an incoming request based on the current mode.
 
         Builds a `CachedRequest`, checks cache, and either replays or forwards
-        to upstream depending on the mode.
+        to upstream depending on the mode. When ``fuzzy_model_matching`` is
+        enabled, a cache miss triggers a secondary lookup by prompt hash so
+        that a cached response recorded with a different model can be reused.
 
         Returns a `CachedResponse` with the response data.
         """
         # Build cache request for lookup
         cached_request = self._build_cached_request(method, path, headers, body, query_params)
 
-        # Check cache for existing response
+        # Check cache for existing response (exact match)
         cached_entry = self.storage.get(cached_request)
+
+        # On exact miss, attempt fuzzy model matching if enabled
+        if cached_entry is None and self.fuzzy_model_matching:
+            cached_entry = self._try_fuzzy_match(body)
 
         if self.mode == Mode.REPLAY_ONLY:
             return self._handle_replay_only(cached_entry, cached_request)
@@ -105,6 +114,25 @@ class Router:
             prompt_hash = CacheStorage.compute_prompt_hash(messages)
 
         return model, temperature, prompt_hash
+
+    def _try_fuzzy_match(self, body: dict[str, Any] | None) -> CacheEntry | None:
+        """
+        Attempt a fuzzy model match by prompt hash.
+
+        Uses `_extract_metadata()` to compute the prompt hash from the request body
+        and searches the cache for any entry with the same prompt hash,
+        regardless of which model was used to record it.
+
+        Returns a `CacheEntry` if a fuzzy match is found, None otherwise.
+        """
+        # Reuse centralized metadata extraction (including prompt hash computation)
+        _, _, prompt_hash = self._extract_metadata(body)
+        if not prompt_hash:
+            return None
+        entry = self.storage.get_by_prompt_hash(prompt_hash)
+        if entry is not None:
+            self.log.info("Fuzzy model match found (prompt_hash=%s, cached_model=%s)", prompt_hash, entry.model)
+        return entry
 
     def _handle_replay_only(self, cached_entry: CacheEntry | None, cached_request: CachedRequest) -> CachedResponse:
         """
