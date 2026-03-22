@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ class CacheStorage:
         Args:
             cache_dir: Directory to store cache files
         """
+        self.log = logging.getLogger("CacheStorage")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -112,6 +114,37 @@ class CacheStorage:
         with open(cache_file, encoding="utf-8") as f:
             data = json.load(f)
         return CacheEntry.model_validate(data)
+
+    def get_by_prompt_hash(self, prompt_hash: str) -> CacheEntry | None:
+        """Look up a cached entry by prompt hash, ignoring the model.
+
+        Scans all cache entries for one whose ``prompt_hash`` matches the
+        given value. Returns the first match found, or None if no entry
+        has a matching prompt hash.
+
+        This is used for fuzzy model matching: when an exact cache key miss
+        occurs, the caller can compute the prompt hash from the request
+        messages and search for any cached entry with the same prompt
+        regardless of which model was used to record it.
+
+        Args:
+            prompt_hash: The prompt hash to search for
+
+        Returns:
+            CacheEntry if a matching entry is found, None otherwise
+        """
+        for cache_file in self.cache_dir.glob("*.json"):
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                entry = CacheEntry.model_validate(data)
+                if entry.prompt_hash == prompt_hash:
+                    self.log.debug("Fuzzy match found in %s (model=%s)", cache_file.stem, entry.model)
+                    return entry
+            except Exception:
+                self.log.warning("Failed to read cache file %s during fuzzy lookup", cache_file, exc_info=True)
+                continue
+        return None
 
     def put(self, entry: CacheEntry) -> str:
         """Store a cache entry.

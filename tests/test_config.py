@@ -32,6 +32,7 @@ class TestConfig:
         assert config.verbose is False
         assert config.test_model == "gpt-4o-mini"
         assert "OK." in config.test_prompt
+        assert config.fuzzy_model_matching is False
 
     def test_custom_values(self) -> None:
         """

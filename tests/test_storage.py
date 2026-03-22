@@ -262,3 +262,56 @@ class TestCacheStorage:
         retrieved = storage.get(request)
         assert retrieved is not None
         assert retrieved.original_client_streaming is False
+
+    def test_get_by_prompt_hash_found(self, storage):
+        """Test that get_by_prompt_hash returns an entry when a matching prompt hash exists."""
+        messages = [{"role": "user", "content": "Hello fuzzy"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "messages": messages})
+        response = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Hi!"}}]})
+        entry = CacheEntry(request=request, response=response, model="gpt-4", prompt_hash=prompt_hash)
+        storage.put(entry)
+
+        result = storage.get_by_prompt_hash(prompt_hash)
+        assert result is not None
+        assert result.model == "gpt-4"
+        assert result.prompt_hash == prompt_hash
+
+    def test_get_by_prompt_hash_not_found(self, storage):
+        """Test that get_by_prompt_hash returns None when no matching prompt hash exists."""
+        result = storage.get_by_prompt_hash("nonexistenthash")
+        assert result is None
+
+    def test_get_by_prompt_hash_ignores_model(self, storage):
+        """Test that get_by_prompt_hash finds entries regardless of the model used."""
+        messages = [{"role": "user", "content": "Hello from model A"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+        # Store entry with model-a
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "model-a", "messages": messages})
+        response = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Response from A"}}]})
+        entry = CacheEntry(request=request, response=response, model="model-a", prompt_hash=prompt_hash)
+        storage.put(entry)
+
+        # Should find it even though we're looking for "any model" via prompt hash
+        result = storage.get_by_prompt_hash(prompt_hash)
+        assert result is not None
+        assert result.model == "model-a"
+
+    def test_get_by_prompt_hash_skips_corrupted_files(self, storage, tmp_path):
+        """Test that get_by_prompt_hash gracefully skips corrupted cache files."""
+        # Write a corrupted JSON file
+        corrupted_file = storage.cache_dir / "corrupted12345678901234567890.json"
+        corrupted_file.write_text("{invalid json", encoding="utf-8")
+
+        # Also store a valid entry
+        messages = [{"role": "user", "content": "Valid entry"}]
+        prompt_hash = CacheStorage.compute_prompt_hash(messages)
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "messages": messages})
+        response = CachedResponse(status_code=200, headers={}, body={"choices": []})
+        entry = CacheEntry(request=request, response=response, model="gpt-4", prompt_hash=prompt_hash)
+        storage.put(entry)
+
+        # Should find the valid entry despite the corrupted file
+        result = storage.get_by_prompt_hash(prompt_hash)
+        assert result is not None
+        assert result.model == "gpt-4"
