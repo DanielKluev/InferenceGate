@@ -172,8 +172,8 @@ class CacheStorage:
 
         cache_file = self._get_cache_file(cache_key)
         if not cache_file.exists():
-            # File was removed after the index was built; evict stale entry
-            del self._prompt_hash_index[prompt_hash]
+            # File was removed after the index was built; rebuild to pick up alternatives
+            self._prompt_hash_index = None
             return None
 
         try:
@@ -184,7 +184,8 @@ class CacheStorage:
             return entry
         except (json.JSONDecodeError, ValidationError):
             self.log.debug("Skipping unreadable cache file %s during fuzzy lookup", cache_file)
-            del self._prompt_hash_index[prompt_hash]
+            # Invalidate and rebuild to pick up alternative entries for this prompt_hash
+            self._prompt_hash_index = None
             return None
 
     def put(self, entry: CacheEntry) -> str:
