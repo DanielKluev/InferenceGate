@@ -128,7 +128,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption("--inferencegate-fuzzy-model-matching", action="store_true", dest="inferencegate_fuzzy_model_matching", default=None,
                     help="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model.")
     group.addoption("--no-inferencegate-fuzzy-model-matching", action="store_false", dest="inferencegate_fuzzy_model_matching",
-                    help="Disable fuzzy model matching, overriding ini/env settings for a single test run.")
+                    default=None, help="Disable fuzzy model matching, overriding ini/env settings for a single test run.")
 
     parser.addini("inferencegate_mode", default="", help="InferenceGate operating mode: replay or record.")
     parser.addini("inferencegate_cache_dir", default="", help="Directory for cached cassettes.")

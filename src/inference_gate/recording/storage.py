@@ -163,30 +163,40 @@ class CacheStorage:
         Returns:
             CacheEntry if a matching entry is found, None otherwise
         """
-        if self._prompt_hash_index is None:
-            self._prompt_hash_index = self._build_prompt_hash_index()
+        for attempt in range(2):
+            if self._prompt_hash_index is None:
+                self._prompt_hash_index = self._build_prompt_hash_index()
 
-        cache_key = self._prompt_hash_index.get(prompt_hash)
-        if cache_key is None:
-            return None
+            cache_key = self._prompt_hash_index.get(prompt_hash)
+            if cache_key is None:
+                # No entry for this prompt_hash in the current index; nothing to return
+                return None
 
-        cache_file = self._get_cache_file(cache_key)
-        if not cache_file.exists():
-            # File was removed after the index was built; rebuild to pick up alternatives
-            self._prompt_hash_index = None
-            return None
+            cache_file = self._get_cache_file(cache_key)
+            if not cache_file.exists():
+                # File was removed after the index was built; rebuild to pick up alternatives
+                self.log.debug("Cache file %s for prompt_hash %s missing during fuzzy lookup (attempt %d); rebuilding index", cache_file,
+                               prompt_hash, attempt + 1)
+                self._prompt_hash_index = None
+                # Retry once with a rebuilt index to find an alternative cassette, if any
+                continue
 
-        try:
-            with open(cache_file, encoding="utf-8") as f:
-                data = json.load(f)
-            entry = CacheEntry.model_validate(data)
-            self.log.debug("Fuzzy match found in %s (model=%s)", cache_key, entry.model)
-            return entry
-        except (json.JSONDecodeError, ValidationError):
-            self.log.debug("Skipping unreadable cache file %s during fuzzy lookup", cache_file)
-            # Invalidate and rebuild to pick up alternative entries for this prompt_hash
-            self._prompt_hash_index = None
-            return None
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                entry = CacheEntry.model_validate(data)
+                self.log.debug("Fuzzy match found in %s (model=%s)", cache_key, entry.model)
+                return entry
+            except (json.JSONDecodeError, ValidationError):
+                self.log.debug("Skipping unreadable cache file %s during fuzzy lookup (attempt %d); rebuilding index", cache_file,
+                               attempt + 1)
+                # Invalidate and rebuild to pick up alternative entries for this prompt_hash
+                self._prompt_hash_index = None
+                # Retry once with a rebuilt index to find an alternative cassette, if any
+                continue
+
+        # After retrying once with a rebuilt index, no valid entry was found
+        return None
 
     def put(self, entry: CacheEntry) -> str:
         """Store a cache entry.
@@ -214,7 +224,10 @@ class CacheStorage:
 
         # Keep the prompt_hash index in sync if it has been built
         if self._prompt_hash_index is not None and entry.prompt_hash:
-            self._prompt_hash_index.setdefault(entry.prompt_hash, cache_key)
+            current_key = self._prompt_hash_index.get(entry.prompt_hash)
+            if current_key is None or cache_key < current_key:
+                # Always keep the lexicographically smallest cache key for a given prompt_hash
+                self._prompt_hash_index[entry.prompt_hash] = cache_key
 
         return cache_key
 
