@@ -92,10 +92,12 @@ def main(ctx: click.Context, config_path: str | None) -> None:
 @click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (defaults to OPENAI_API_KEY env var)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
+@click.option("--fuzzy-model-matching/--no-fuzzy-model-matching", default=None,
+              help="Enable or disable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
-          web_ui: bool, web_ui_port: int, verbose: bool | None) -> None:
+          web_ui: bool, web_ui_port: int, fuzzy_model_matching: bool | None, verbose: bool | None) -> None:
     """
     Start in record-and-replay mode (default).
 
@@ -113,16 +115,20 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     actual_upstream = upstream if upstream is not None else config.upstream
     actual_api_key = api_key if api_key is not None else config.api_key
     actual_verbose = verbose if verbose is not None else config.verbose
+    actual_fuzzy = fuzzy_model_matching if fuzzy_model_matching is not None else config.fuzzy_model_matching
 
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.RECORD_AND_REPLAY, cache_dir=actual_cache_dir,
-                         upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port)
+                         upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port,
+                         fuzzy_model_matching=actual_fuzzy)
 
     click.echo("Starting InferenceGate in record-and-replay mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Upstream: {actual_upstream}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
+    if actual_fuzzy:
+        click.echo("  Fuzzy model matching: enabled")
     if web_ui:
         click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
@@ -135,10 +141,12 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
 @click.option("--cache-dir", "-c", default=None, help="Directory to store cached responses (default: .inference_cache)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
+@click.option("--fuzzy-model-matching/--no-fuzzy-model-matching", default=None,
+              help="Enable or disable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, web_ui: bool, web_ui_port: int,
-           verbose: bool | None) -> None:
+           fuzzy_model_matching: bool | None, verbose: bool | None) -> None:
     """
     Start in replay-only mode.
 
@@ -154,15 +162,18 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
     actual_host = host if host is not None else config.host
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
     actual_verbose = verbose if verbose is not None else config.verbose
+    actual_fuzzy = fuzzy_model_matching if fuzzy_model_matching is not None else config.fuzzy_model_matching
 
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.REPLAY_ONLY, cache_dir=actual_cache_dir, web_ui=web_ui,
-                         web_ui_port=web_ui_port)
+                         web_ui_port=web_ui_port, fuzzy_model_matching=actual_fuzzy)
 
     click.echo("Starting InferenceGate in replay-only mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
+    if actual_fuzzy:
+        click.echo("  Fuzzy model matching: enabled")
     if web_ui:
         click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 

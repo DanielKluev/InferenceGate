@@ -2,10 +2,11 @@
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 
 class CachedRequest(BaseModel):
@@ -48,8 +49,12 @@ class CacheStorage:
         Args:
             cache_dir: Directory to store cache files
         """
+        self.log = logging.getLogger("CacheStorage")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Lazily-built index mapping prompt_hash -> cache_key for fast fuzzy lookups.
+        # Populated on the first call to get_by_prompt_hash() and kept in sync by put().
+        self._prompt_hash_index: dict[str, str] | None = None
 
     # Fields excluded from cache key computation so that streaming and
     # non-streaming requests for the same prompt share the same entry.
@@ -113,6 +118,86 @@ class CacheStorage:
             data = json.load(f)
         return CacheEntry.model_validate(data)
 
+    def _build_prompt_hash_index(self) -> dict[str, str]:
+        """Build an in-memory index mapping prompt_hash to cache_key.
+
+        Scans all cassette files once and returns a ``{prompt_hash: cache_key}``
+        dict. Files are processed in sorted order so that the *first* match for
+        a given prompt_hash is deterministic across filesystems.
+
+        Returns:
+            Mapping of prompt_hash to cache_key
+        """
+        index: dict[str, str] = {}
+        for cache_file in sorted(self.cache_dir.glob("*.json")):
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                entry = CacheEntry.model_validate(data)
+                if entry.prompt_hash and entry.prompt_hash not in index:
+                    index[entry.prompt_hash] = cache_file.stem
+            except (json.JSONDecodeError, ValidationError):
+                self.log.debug("Skipping unreadable cache file %s during index build", cache_file)
+                continue
+        return index
+
+    def get_by_prompt_hash(self, prompt_hash: str) -> CacheEntry | None:
+        """Look up a cached entry by prompt hash, ignoring the model.
+
+        Uses a lazily-built in-memory index (``prompt_hash`` → ``cache_key``)
+        to avoid scanning the entire cache directory on every call. The index
+        is built once on the first lookup and kept in sync when new entries
+        are stored via ``put()``.
+
+        When multiple cassettes share the same prompt hash, the one whose
+        filename sorts first is returned (deterministic across runs).
+
+        This is used for fuzzy model matching: when an exact cache key miss
+        occurs, the caller can compute the prompt hash from the request
+        messages and search for any cached entry with the same prompt
+        regardless of which model was used to record it.
+
+        Args:
+            prompt_hash: The prompt hash to search for
+
+        Returns:
+            CacheEntry if a matching entry is found, None otherwise
+        """
+        for attempt in range(2):
+            if self._prompt_hash_index is None:
+                self._prompt_hash_index = self._build_prompt_hash_index()
+
+            cache_key = self._prompt_hash_index.get(prompt_hash)
+            if cache_key is None:
+                # No entry for this prompt_hash in the current index; nothing to return
+                return None
+
+            cache_file = self._get_cache_file(cache_key)
+            if not cache_file.exists():
+                # File was removed after the index was built; rebuild to pick up alternatives
+                self.log.debug("Cache file %s for prompt_hash %s missing during fuzzy lookup (attempt %d); rebuilding index", cache_file,
+                               prompt_hash, attempt + 1)
+                self._prompt_hash_index = None
+                # Retry once with a rebuilt index to find an alternative cassette, if any
+                continue
+
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                entry = CacheEntry.model_validate(data)
+                self.log.debug("Fuzzy match found in %s (model=%s)", cache_key, entry.model)
+                return entry
+            except (json.JSONDecodeError, ValidationError):
+                self.log.debug("Skipping unreadable cache file %s during fuzzy lookup (attempt %d); rebuilding index", cache_file,
+                               attempt + 1)
+                # Invalidate and rebuild to pick up alternative entries for this prompt_hash
+                self._prompt_hash_index = None
+                # Retry once with a rebuilt index to find an alternative cassette, if any
+                continue
+
+        # After retrying once with a rebuilt index, no valid entry was found
+        return None
+
     def put(self, entry: CacheEntry) -> str:
         """Store a cache entry.
 
@@ -136,6 +221,13 @@ class CacheStorage:
 
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+        # Keep the prompt_hash index in sync if it has been built
+        if self._prompt_hash_index is not None and entry.prompt_hash:
+            current_key = self._prompt_hash_index.get(entry.prompt_hash)
+            if current_key is None or cache_key < current_key:
+                # Always keep the lexicographically smallest cache key for a given prompt_hash
+                self._prompt_hash_index[entry.prompt_hash] = cache_key
 
         return cache_key
 
@@ -161,6 +253,8 @@ class CacheStorage:
         for cache_file in self.cache_dir.glob("*.json"):
             cache_file.unlink()
             count += 1
+        # Invalidate the prompt_hash index since all entries are gone
+        self._prompt_hash_index = None
         return count
 
     def list_entries(self) -> list[tuple[str, CacheEntry]]:

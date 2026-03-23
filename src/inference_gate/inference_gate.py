@@ -27,7 +27,7 @@ class InferenceGate:
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
                  upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
-                 web_ui_port: int = 8081, non_streaming_models: list[str] | None = None) -> None:
+                 web_ui_port: int = 8081, non_streaming_models: list[str] | None = None, fuzzy_model_matching: bool = False) -> None:
         """
         Initialize InferenceGate with configuration.
 
@@ -39,6 +39,8 @@ class InferenceGate:
         `web_ui` enables the optional web dashboard.
         `web_ui_port` is the port for the web UI server.
         `non_streaming_models` is a list of model names that do not support streaming.
+        `fuzzy_model_matching` enables fallback to cache entries with the same prompt
+        but a different model when the exact cache key is not found.
         """
         self.log = logging.getLogger("InferenceGate")
         self.host = host
@@ -50,6 +52,7 @@ class InferenceGate:
         self.web_ui = web_ui
         self.web_ui_port = web_ui_port
         self.non_streaming_models = non_streaming_models or []
+        self.fuzzy_model_matching = fuzzy_model_matching
 
         # Components (created during start)
         self._storage: CacheStorage | None = None
@@ -72,7 +75,8 @@ class InferenceGate:
         else:
             self._outflow = None
 
-        self._router = Router(mode=self.mode, storage=self._storage, outflow=self._outflow, non_streaming_models=self.non_streaming_models)
+        self._router = Router(mode=self.mode, storage=self._storage, outflow=self._outflow, non_streaming_models=self.non_streaming_models,
+                              fuzzy_model_matching=self.fuzzy_model_matching)
         self._server = InflowServer(host=self.host, port=self.port, router=self._router)
 
         # WebUIServer is optional
