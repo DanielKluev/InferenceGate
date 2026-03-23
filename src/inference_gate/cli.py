@@ -12,6 +12,7 @@ Command-line options override configuration file values.
 """
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -261,8 +262,8 @@ def cache_info(ctx: click.Context, cache_dir: str | None) -> None:
 # =============================================================================
 
 
-async def _send_test_prompt(url: str, headers: dict[str, str], model: str, prompt: str, verbose: bool,
-                           stream: bool = False) -> tuple[bool, str]:
+async def _send_test_prompt(url: str, headers: dict[str, str], model: str, prompt: str, verbose: bool, stream: bool = False,
+                            show_thinking: bool = False) -> tuple[bool, str]:
     """
     Send a test prompt to a Chat Completions endpoint.
 
@@ -271,13 +272,14 @@ async def _send_test_prompt(url: str, headers: dict[str, str], model: str, promp
     `model` is the model name to request.
     `prompt` is the user message to send.
     `stream` enables streaming mode (SSE) for the request.
+    `show_thinking` controls whether reasoning/thinking tokens are displayed.
 
     Returns a tuple of (success, response_text).
     """
     setup_logging(verbose)
     log = logging.getLogger("TestCommand")
 
-    payload: dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 50}
+    payload: dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 200}
     if stream:
         payload["stream"] = True
 
@@ -293,9 +295,9 @@ async def _send_test_prompt(url: str, headers: dict[str, str], model: str, promp
                     return False, f"HTTP {resp.status}: {error_text}"
 
                 if stream:
-                    return await _read_streaming_response(resp, log)
+                    return await _read_streaming_response(resp, log, show_thinking=show_thinking)
                 else:
-                    return await _read_standard_response(resp)
+                    return await _read_standard_response(resp, show_thinking=show_thinking)
         except aiohttp.ClientConnectorError as e:
             return False, f"Connection refused: {e}"
         except aiohttp.ClientError as e:
@@ -304,31 +306,42 @@ async def _send_test_prompt(url: str, headers: dict[str, str], model: str, promp
             return False, f"Error: {e}"
 
 
-async def _read_standard_response(resp: aiohttp.ClientResponse) -> tuple[bool, str]:
+async def _read_standard_response(resp: aiohttp.ClientResponse, show_thinking: bool = False) -> tuple[bool, str]:
     """
     Read a standard (non-streaming) Chat Completions response.
+
+    If `show_thinking` is True, reasoning/thinking tokens are prepended with markers.
 
     Returns a tuple of (success, response_text).
     """
     data = await resp.json()
     if "choices" in data and len(data["choices"]) > 0:
-        content = data["choices"][0].get("message", {}).get("content") or ""
-        return True, content.strip()
+        message = data["choices"][0].get("message", {})
+        content = (message.get("content") or "").strip()
+        reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
+        result_parts: list[str] = []
+        if show_thinking and reasoning:
+            result_parts.append(f"<thinking>{reasoning}</thinking>\n")
+        result_parts.append(content)
+        return True, "".join(result_parts)
     else:
         return False, f"Unexpected response format: {data}"
 
 
-async def _read_streaming_response(resp: aiohttp.ClientResponse, log: logging.Logger) -> tuple[bool, str]:
+async def _read_streaming_response(resp: aiohttp.ClientResponse, log: logging.Logger, show_thinking: bool = False) -> tuple[bool, str]:
     """
-    Read a streaming (SSE) Chat Completions response and reassemble the content.
+    Read a streaming (SSE) Chat Completions response, printing tokens live as they arrive.
 
-    Parses `data:` lines from the SSE stream and concatenates content deltas.
+    Parses `data:` lines from the SSE stream and prints content deltas in real-time.
+    If `show_thinking` is True, reasoning/thinking tokens are also displayed with markers.
 
     Returns a tuple of (success, assembled_content).
     """
-    import json
     content_parts: list[str] = []
+    thinking_parts: list[str] = []
     chunk_count = 0
+    in_thinking = False
+    started_output = False
 
     async for raw_chunk in resp.content.iter_any():
         text = raw_chunk.decode("utf-8")
@@ -344,14 +357,42 @@ async def _read_streaming_response(resp: aiohttp.ClientResponse, log: logging.Lo
                 chunk_count += 1
                 for choice in event.get("choices", []):
                     delta = choice.get("delta", {})
-                    if "content" in delta and delta["content"] is not None:
+                    # Handle thinking/reasoning tokens
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if reasoning is not None:
+                        thinking_parts.append(reasoning)
+                        if show_thinking:
+                            if not started_output:
+                                click.echo("\nResponse: ", nl=False)
+                                started_output = True
+                            if not in_thinking:
+                                click.echo("<thinking>", nl=False)
+                                in_thinking = True
+                            click.echo(reasoning, nl=False)
+                    # Handle content tokens (skip empty strings from reasoning-only chunks)
+                    if delta.get("content"):
+                        if not started_output:
+                            click.echo("\nResponse: ", nl=False)
+                            started_output = True
+                        if in_thinking:
+                            click.echo("</thinking>", nl=False)
+                            in_thinking = False
                         content_parts.append(delta["content"])
+                        click.echo(delta["content"], nl=False)
             except (json.JSONDecodeError, ValueError):
                 log.debug("Skipping non-JSON SSE line: %s", data_str[:80])
+
+    if in_thinking:
+        click.echo("</thinking>", nl=False)
+    if started_output:
+        click.echo()  # Final newline after streamed output
 
     log.debug("Received %d streaming chunks", chunk_count)
     if content_parts:
         return True, "".join(content_parts).strip()
+    elif thinking_parts:
+        # Got thinking tokens but no content — still a success
+        return True, "(thinking-only response, no text content)"
     elif chunk_count > 0:
         # Got chunks but no content (e.g. tool call only) — still a success
         return True, "(streaming response received, no text content)"
@@ -359,17 +400,24 @@ async def _read_streaming_response(resp: aiohttp.ClientResponse, log: logging.Lo
         return False, "No streaming chunks received"
 
 
-def _print_test_result(success: bool, response: str, ctx: click.Context) -> None:
+def _print_test_result(success: bool, response: str, ctx: click.Context, streamed: bool = False, is_default_prompt: bool = True) -> None:
     """
     Print the result of a test prompt and exit with appropriate code.
+
+    If `streamed` is True, the response was already printed live and is not re-printed.
+    If `is_default_prompt` is True, the response is validated against the expected "OK" output.
     """
     if success:
-        click.echo(f"\nResponse: {response}")
-        if response.strip().rstrip(".").upper() == "OK":
-            click.echo("\n[SUCCESS] Test passed!")
+        if not streamed:
+            click.echo(f"\nResponse: {response}")
+        if is_default_prompt:
+            if response.strip().rstrip(".").upper() == "OK":
+                click.echo("\n[SUCCESS] Test passed!")
+            else:
+                click.echo("\n[WARNING] Received a response, but with unexpected content.")
+                click.echo("This may indicate the endpoint is working but the model did not follow the test prompt exactly.")
         else:
-            click.echo("\n[WARNING] Received a response, but with unexpected content.")
-            click.echo("This may indicate the endpoint is working but the model did not follow the test prompt exactly.")
+            click.echo("\n[SUCCESS] Response received.")
     else:
         click.echo(f"\n[FAILED] {response}", err=True)
         ctx.exit(1)
@@ -381,10 +429,11 @@ def _print_test_result(success: bool, response: str, ctx: click.Context) -> None
 @click.option("--model", "-m", default=None, help="Model to use for the test (default: gpt-4o-mini)")
 @click.option("--prompt", default=None, help="Custom prompt to send")
 @click.option("--stream/--no-stream", default=False, help="Enable or disable streaming mode (default: non-streaming)")
+@click.option("--show-thinking/--hide-thinking", default=False, help="Show or hide model thinking/reasoning tokens (default: hide)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str | None, prompt: str | None, stream: bool,
-             verbose: bool | None) -> None:
+              show_thinking: bool, verbose: bool | None) -> None:
     """
     Test a running InferenceGate instance.
 
@@ -395,6 +444,7 @@ def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str
     No API key is needed — the running instance already has it configured.
 
     Use --stream to test streaming (SSE) responses, --no-stream (default) for standard JSON responses.
+    Use --show-thinking to display model reasoning/thinking tokens.
 
     Command-line options override configuration file values.
     """
@@ -414,8 +464,9 @@ def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str
     click.echo(f"Using model: {actual_model}")
     click.echo(f"Streaming: {stream}")
 
-    success, response = asyncio.run(_send_test_prompt(gate_url, headers, actual_model, actual_prompt, actual_verbose, stream=stream))
-    _print_test_result(success, response, ctx)
+    success, response = asyncio.run(
+        _send_test_prompt(gate_url, headers, actual_model, actual_prompt, actual_verbose, stream=stream, show_thinking=show_thinking))
+    _print_test_result(success, response, ctx, streamed=stream, is_default_prompt=(prompt is None))
 
 
 @main.command(name="test-upstream")
@@ -424,10 +475,11 @@ def test_gate(ctx: click.Context, host: str | None, port: int | None, model: str
 @click.option("--model", "-m", default=None, help="Model to use for the test (default: gpt-4o-mini)")
 @click.option("--prompt", default=None, help="Custom prompt to send")
 @click.option("--stream/--no-stream", default=False, help="Enable or disable streaming mode (default: non-streaming)")
+@click.option("--show-thinking/--hide-thinking", default=False, help="Show or hide model thinking/reasoning tokens (default: hide)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None, model: str | None, prompt: str | None, stream: bool,
-                 verbose: bool | None) -> None:
+                  show_thinking: bool, verbose: bool | None) -> None:
     """
     Test the connection to the upstream API directly.
 
@@ -435,6 +487,7 @@ def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None,
     to verify that the API key and endpoint are working correctly.
 
     Use --stream to test streaming (SSE) responses, --no-stream (default) for standard JSON responses.
+    Use --show-thinking to display model reasoning/thinking tokens.
 
     Command-line options override configuration file values.
     """
@@ -459,8 +512,9 @@ def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None,
     click.echo(f"Using model: {actual_model}")
     click.echo(f"Streaming: {stream}")
 
-    success, response = asyncio.run(_send_test_prompt(url, headers, actual_model, actual_prompt, actual_verbose, stream=stream))
-    _print_test_result(success, response, ctx)
+    success, response = asyncio.run(
+        _send_test_prompt(url, headers, actual_model, actual_prompt, actual_verbose, stream=stream, show_thinking=show_thinking))
+    _print_test_result(success, response, ctx, streamed=stream, is_default_prompt=(prompt is None))
 
 
 # =============================================================================

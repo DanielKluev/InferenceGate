@@ -137,6 +137,14 @@ def _merge_delta_into_message(message: dict[str, Any], delta: dict[str, Any]) ->
             message["content"] = ""
         message["content"] += delta["content"]
 
+    # Reasoning content (used by models that expose chain-of-thought, e.g. DeepSeek-R1, o-series)
+    for reasoning_key in ("reasoning_content", "reasoning"):
+        if reasoning_key in delta and delta[reasoning_key] is not None:
+            if message.get("reasoning_content") is None:
+                message["reasoning_content"] = ""
+            message["reasoning_content"] += delta[reasoning_key]
+            break
+
     # Refusal
     if "refusal" in delta and delta["refusal"] is not None:
         if message.get("refusal") is None:
