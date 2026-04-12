@@ -24,7 +24,9 @@ from inference_gate.cli_format import (format_index_rows_json, format_index_rows
 from inference_gate.config import Config, ConfigManager
 from inference_gate.inference_gate import InferenceGate
 from inference_gate.modes import Mode
-from inference_gate.recording.storage import CacheStorage
+from inference_gate.outflow.client import OutflowClient
+from inference_gate.recording.hashing import compute_response_hash
+from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
 # Global config manager and config, set up via pass_context
 pass_config = click.make_pass_decorator(Config, ensure=True)
@@ -102,11 +104,12 @@ def main(ctx: click.Context, config_path: str | None) -> None:
               help="Max replies to collect per non-greedy cassette before cycling (default: 5)")
 @click.option("--upstream-timeout", default=None, type=float,
               help="Timeout in seconds for upstream API requests before returning 504 (default: 120.0)")
+@click.option("--proxy", default=None, help="HTTP proxy URL for upstream requests (e.g. http://127.0.0.1:8888/)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
           web_ui: bool, web_ui_port: int, fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None,
-          upstream_timeout: float | None, verbose: bool | None) -> None:
+          upstream_timeout: float | None, proxy: str | None, verbose: bool | None) -> None:
     """
     Start in record-and-replay mode (default).
 
@@ -128,19 +131,22 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     actual_fuzzy_sampling = fuzzy_sampling if fuzzy_sampling is not None else config.fuzzy_sampling
     actual_max_replies = max_non_greedy_replies if max_non_greedy_replies is not None else config.max_non_greedy_replies
     actual_timeout = upstream_timeout if upstream_timeout is not None else config.upstream_timeout
+    actual_proxy = proxy if proxy is not None else config.proxy
 
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.RECORD_AND_REPLAY, cache_dir=actual_cache_dir,
                          upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port,
                          fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling, max_non_greedy_replies=actual_max_replies,
-                         upstream_timeout=actual_timeout)
+                         upstream_timeout=actual_timeout, proxy=actual_proxy)
 
     click.echo("Starting InferenceGate in record-and-replay mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Upstream: {actual_upstream}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
     click.echo(f"  Upstream timeout: {actual_timeout}s")
+    if actual_proxy:
+        click.echo(f"  HTTP proxy: {actual_proxy}")
     if actual_fuzzy_model:
         click.echo("  Fuzzy model matching: enabled")
     if actual_fuzzy_sampling != "off":
@@ -462,6 +468,210 @@ def cassette_reindex(ctx: click.Context, cache_dir: str | None) -> None:
     storage = CacheStorage(actual_cache_dir)
     count = storage.reindex()
     click.echo(f"Reindexed {count} tape files in {actual_cache_dir}")
+
+
+@cassette.command(name="fill")
+@click.argument("cassette_id")
+@click.option("--count", "-n", default=None, type=int,
+              help="Target number of unique completions (default: max_non_greedy_replies from config)")
+@click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.option("--upstream", "-u", default=None, help="Upstream OpenAI API base URL")
+@click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (defaults to OPENAI_API_KEY env var)")
+@click.option("--upstream-timeout", default=None, type=float, help="Timeout in seconds for upstream API requests (default: 120.0)")
+@click.option("--proxy", default=None, help="HTTP proxy URL for upstream requests")
+@click.option("--max-attempts", default=None, type=int,
+              help="Maximum number of upstream requests before giving up (default: 3x target count)")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON")
+@click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
+@click.pass_context
+def cassette_fill(ctx: click.Context, cassette_id: str, count: int | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
+                  upstream_timeout: float | None, proxy: str | None, max_attempts: int | None, as_json: bool, verbose: bool | None) -> None:
+    """Fill a non-greedy cassette with additional unique completions.
+
+    Re-issues the original request to the upstream endpoint to collect more
+    unique completions for a cassette until it has COUNT total replies.
+    Responses are de-duplicated by content hash, so identical completions
+    are not stored twice.
+
+    CASSETTE_ID is the content hash (or unique prefix) of the cassette to fill.
+
+    Only works with non-greedy cassettes (temperature > 0). Greedy cassettes
+    always produce the same output, so filling them makes no sense.
+    """
+    config = get_config(ctx)
+
+    actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
+    actual_upstream = upstream if upstream is not None else config.upstream
+    actual_api_key = api_key if api_key is not None else config.api_key
+    actual_timeout = upstream_timeout if upstream_timeout is not None else config.upstream_timeout
+    actual_proxy = proxy if proxy is not None else config.proxy
+    actual_verbose = verbose if verbose is not None else config.verbose
+    target_count = count if count is not None else config.max_non_greedy_replies
+
+    setup_logging(actual_verbose)
+
+    if not actual_api_key:
+        click.echo("Error: No API key provided. Set OPENAI_API_KEY environment variable, use --api-key, or configure in config file.",
+                   err=True)
+        ctx.exit(1)
+        return
+
+    storage = CacheStorage(actual_cache_dir)
+    resolved = _resolve_cassette_id(storage, cassette_id)
+    if resolved is None:
+        ctx.exit(1)
+        return
+
+    # Load tape metadata to validate
+    tape_data = storage.load_tape(resolved)
+    if tape_data is None:
+        click.echo(f"Error: tape file not found for cassette {resolved}", err=True)
+        ctx.exit(1)
+        return
+
+    metadata, _ = tape_data
+    index_row = storage.index.by_content_hash.get(resolved)
+
+    # Validate: must be non-greedy
+    if metadata.sampling.is_greedy:
+        click.echo("Error: cassette uses greedy sampling (temperature=0). Filling only works with non-greedy cassettes.", err=True)
+        ctx.exit(1)
+        return
+
+    existing_replies = index_row.replies if index_row else metadata.replies
+    if existing_replies >= target_count:
+        click.echo(f"Cassette already has {existing_replies} replies (target: {target_count}). Nothing to do.")
+        return
+
+    # Reconstruct the request body from the tape
+    request_body = storage.reconstruct_request_body(resolved)
+    if request_body is None:
+        click.echo(f"Error: could not reconstruct request body from cassette {resolved}", err=True)
+        ctx.exit(1)
+        return
+
+    needed = target_count - existing_replies
+    actual_max_attempts = max_attempts if max_attempts is not None else needed * 3
+
+    if not as_json:
+        click.echo(f"Cassette: {resolved}")
+        click.echo(f"  Model: {metadata.model}")
+        click.echo(f"  Existing replies: {existing_replies}")
+        click.echo(f"  Target: {target_count}")
+        click.echo(f"  Need: {needed} more unique completions")
+        click.echo(f"  Max attempts: {actual_max_attempts}")
+        click.echo(f"  Upstream: {actual_upstream}")
+        click.echo()
+
+    result = asyncio.run(
+        _fill_cassette(storage, resolved, request_body, metadata.endpoint, actual_upstream, actual_api_key, actual_timeout, actual_proxy,
+                       target_count, actual_max_attempts))
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"Done: {result['added']} new unique completions added ({result['duplicates']} duplicates, "
+                   f"{result['errors']} errors in {result['attempts']} attempts)")
+        click.echo(f"Cassette now has {result['total_replies']} replies")
+        if result['errors'] > 0:
+            click.echo("Warning: some upstream requests failed. Check --verbose for details.", err=True)
+
+
+async def _fill_cassette(storage: CacheStorage, content_hash: str, request_body: dict[str, Any], endpoint: str, upstream_base_url: str,
+                         api_key: str, timeout: float, proxy: str | None, target_count: int, max_attempts: int) -> dict[str, Any]:
+    """
+    Fill a cassette with unique completions by re-issuing requests to upstream.
+
+    Sends the reconstructed request to the upstream endpoint up to `max_attempts`
+    times, de-duplicating responses by content hash. Stops when the cassette has
+    `target_count` total replies or `max_attempts` is exhausted.
+
+    Returns a dict with fill statistics: added, duplicates, errors, attempts, total_replies.
+    """
+    log = logging.getLogger("FillCassette")
+
+    # Collect existing response hashes for de-duplication
+    existing_hashes = set(storage.get_reply_response_hashes(content_hash))
+    index_row = storage.index.by_content_hash.get(content_hash)
+    current_replies = index_row.replies if index_row else 0
+
+    added = 0
+    duplicates = 0
+    errors = 0
+    attempts = 0
+
+    # Ensure request is non-streaming for fill (we just need the response body)
+    fill_body = dict(request_body)
+    fill_body.pop("stream", None)
+    fill_body.pop("stream_options", None)
+
+    client = OutflowClient(upstream_base_url, api_key=api_key, timeout=timeout, proxy=proxy)
+    await client.start()
+
+    try:
+        while current_replies < target_count and attempts < max_attempts:
+            attempts += 1
+            log.info("Fill attempt %d/%d (have %d/%d replies)", attempts, max_attempts, current_replies, target_count)
+
+            request = CachedRequest(method="POST", path=endpoint, headers={"Content-Type": "application/json"}, body=fill_body)
+
+            try:
+                response = await client.forward_request(request)
+            except Exception as e:
+                log.error("Upstream request failed: %s", e)
+                errors += 1
+                continue
+
+            if response.status_code != 200:
+                log.error("Upstream returned HTTP %d", response.status_code)
+                errors += 1
+                continue
+
+            # Compute response hash for de-duplication
+            resp_body = response.body
+            if resp_body is None and response.is_streaming and response.chunks:
+                from inference_gate.recording.reassembly import reassemble_streaming_response
+                resp_body = reassemble_streaming_response(response.chunks, "")
+
+            if resp_body is None:
+                log.warning("Empty response body, skipping")
+                errors += 1
+                continue
+
+            response_hash = compute_response_hash(resp_body)
+
+            if response_hash in existing_hashes:
+                log.info("Duplicate response (hash=%s), skipping", response_hash)
+                duplicates += 1
+                continue
+
+            # Store the new unique completion
+            entry = CacheEntry(request=request, response=response, model=fill_body.get("model"), temperature=fill_body.get("temperature"))
+            storage._append_reply(content_hash, entry, index_row)
+
+            existing_hashes.add(response_hash)
+            current_replies += 1
+            added += 1
+            log.info("Added reply %d (hash=%s)", current_replies, response_hash)
+
+            # Refresh index row for next iteration
+            index_row = storage.index.by_content_hash.get(content_hash)
+    finally:
+        await client.stop()
+
+    # Update max_replies if target_count is larger
+    if target_count > (index_row.max_replies if index_row else 0):
+        storage._update_max_replies(content_hash, target_count)
+
+    return {
+        "content_hash": content_hash,
+        "added": added,
+        "duplicates": duplicates,
+        "errors": errors,
+        "attempts": attempts,
+        "total_replies": current_replies,
+        "target": target_count,
+    }
 
 
 # =============================================================================

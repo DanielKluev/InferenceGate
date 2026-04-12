@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 from inference_gate.recording.hashing import (compute_content_hash, compute_prompt_hash, compute_prompt_model_hash, compute_response_hash,
                                               extract_first_user_message, generate_slug)
-from inference_gate.recording.models import IndexRow, ReplyInfo, SamplingParams, TapeMetadata, extract_sampling_params
+from inference_gate.recording.models import IndexRow, ReplyInfo, SamplingParams, SectionKind, TapeMetadata, extract_sampling_params
 from inference_gate.recording.tape_index import TapeIndex
 from inference_gate.recording.tape_parser import parse_tape
 from inference_gate.recording.tape_writer import (append_reply_to_tape, build_message_sections, build_reply_section, generate_boundary,
@@ -285,6 +285,35 @@ class CacheStorage:
         self.log.info("Appended reply %d to cassette %s", new_reply_count, content_hash)
         return content_hash
 
+    def _update_max_replies(self, content_hash: str, new_max_replies: int) -> None:
+        """
+        Update the `max_replies` field in a cassette's tape frontmatter and index.
+
+        Rewrites the tape file with updated metadata and updates the index row.
+        """
+        tape_path = self._find_tape_file(content_hash)
+        if tape_path is None:
+            self.log.warning("Cannot update max_replies: tape file for %s not found", content_hash)
+            return
+
+        result = self.load_tape(content_hash)
+        if result is None:
+            return
+
+        metadata, sections = result
+        metadata.max_replies = new_max_replies
+        write_tape_to_file(tape_path, metadata, sections)
+
+        # Update index
+        row = self.index.by_content_hash.get(content_hash)
+        if row is not None:
+            updated = row.model_copy(update={"max_replies": new_max_replies})
+            self.index._remove_row(row)
+            self.index._add_row_to_indexes(updated)
+            self.index._write_tsv()
+
+        self.log.info("Updated max_replies to %d for cassette %s", new_max_replies, content_hash)
+
     def load_response(self, response_hash: str, streaming: bool = False) -> CachedResponse | None:
         """
         Load a response from the `responses/` directory by hash.
@@ -342,7 +371,6 @@ class CacheStorage:
         if result is None:
             return []
 
-        from inference_gate.recording.models import SectionKind
         _, sections = result
         hashes = []
         for section in sections:
@@ -404,6 +432,94 @@ class CacheStorage:
             )
             entries.append((row.content_hash, entry))
         return entries
+
+    def reconstruct_request_body(self, content_hash: str) -> dict[str, Any] | None:
+        """
+        Reconstruct the original request body from a tape file.
+
+        Rebuilds the Chat Completions / Responses API body from the tape's
+        YAML metadata (model, sampling, max_tokens, tools, etc.) and MIME
+        body sections (messages). Returns None if the tape cannot be loaded.
+
+        Note: multimodal attachments (images) may lose data if the URL was
+        truncated during recording.
+        """
+        result = self.load_tape(content_hash)
+        if result is None:
+            return None
+
+        metadata, sections = result
+        body: dict[str, Any] = {}
+
+        # Model and endpoint
+        if metadata.model:
+            body["model"] = metadata.model
+
+        # Reconstruct messages from sections
+        messages: list[dict[str, Any]] = []
+        for section in sections:
+            if section.kind == SectionKind.SYSTEM:
+                messages.append({"role": "system", "content": section.body})
+            elif section.kind == SectionKind.USER:
+                messages.append({"role": "user", "content": section.body})
+            elif section.kind == SectionKind.USER_ATTACHMENT:
+                # Try to reconstruct multimodal content; attach to previous user message or create new one
+                attach_type = section.metadata.get("Type", "")
+                url = section.metadata.get("URL", "")
+                if attach_type == "image" and url:
+                    part = {"type": "image_url", "image_url": {"url": url}}
+                    if messages and messages[-1].get("role") == "user":
+                        # Convert last user message to multimodal if needed
+                        prev = messages[-1]
+                        if isinstance(prev["content"], str):
+                            prev["content"] = [{"type": "text", "text": prev["content"]}, part]
+                        elif isinstance(prev["content"], list):
+                            prev["content"].append(part)
+                    else:
+                        messages.append({"role": "user", "content": [part]})
+            elif section.kind == SectionKind.ASSISTANT_PREFILL:
+                messages.append({"role": "assistant", "content": section.body})
+            elif section.kind == SectionKind.TOOLS:
+                # Tools section body is JSON
+                try:
+                    body["tools"] = json.loads(section.body)
+                except (json.JSONDecodeError, ValueError):
+                    self.log.warning("Failed to parse tools JSON in cassette %s", content_hash)
+
+        if messages:
+            body["messages"] = messages
+
+        # Sampling parameters
+        if metadata.sampling.temperature is not None:
+            body["temperature"] = metadata.sampling.temperature
+        if metadata.sampling.top_p is not None:
+            body["top_p"] = metadata.sampling.top_p
+        if metadata.sampling.top_k is not None:
+            body["top_k"] = metadata.sampling.top_k
+        if metadata.sampling.min_p is not None:
+            body["min_p"] = metadata.sampling.min_p
+        if metadata.sampling.repetition_penalty is not None:
+            body["repetition_penalty"] = metadata.sampling.repetition_penalty
+        if metadata.sampling.frequency_penalty is not None:
+            body["frequency_penalty"] = metadata.sampling.frequency_penalty
+        if metadata.sampling.presence_penalty is not None:
+            body["presence_penalty"] = metadata.sampling.presence_penalty
+        if metadata.sampling.seed is not None:
+            body["seed"] = metadata.sampling.seed
+
+        # Other request parameters
+        if metadata.max_tokens is not None:
+            body["max_tokens"] = metadata.max_tokens
+        if metadata.stop_sequences:
+            body["stop"] = metadata.stop_sequences
+        if metadata.tool_choice is not None:
+            body["tool_choice"] = metadata.tool_choice
+        if metadata.logprobs:
+            body["logprobs"] = True
+        if metadata.top_logprobs is not None:
+            body["top_logprobs"] = metadata.top_logprobs
+
+        return body
 
     def reindex(self) -> int:
         """

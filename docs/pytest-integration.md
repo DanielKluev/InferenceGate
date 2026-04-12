@@ -72,6 +72,7 @@ The proxy handles both streaming and non-streaming requests transparently. All c
 | `--inferencegate-cache-dir` | `tests/cassettes` | Directory for stored cassettes |
 | `--inferencegate-config` | auto-detect | Path to InferenceGate `config.yaml` |
 | `--inferencegate-port` | `0` | Server port (`0` = OS-assigned) |
+| `--inferencegate-proxy` | none | HTTP proxy URL for upstream requests |
 
 ### Environment Variables
 
@@ -81,6 +82,7 @@ The proxy handles both streaming and non-streaming requests transparently. All c
 | `INFERENCEGATE_CACHE_DIR` | `--inferencegate-cache-dir` |
 | `INFERENCEGATE_CONFIG` | `--inferencegate-config` |
 | `INFERENCEGATE_PORT` | `--inferencegate-port` |
+| `INFERENCEGATE_PROXY` | `--inferencegate-proxy` |
 
 ### ini Options (`pytest.ini` / `pyproject.toml`)
 
@@ -88,6 +90,7 @@ The proxy handles both streaming and non-streaming requests transparently. All c
 [tool.pytest.ini_options]
 inferencegate_mode = "replay"
 inferencegate_cache_dir = "tests/cassettes"
+inferencegate_proxy = "http://127.0.0.1:8888/"
 ```
 
 ### Resolution Order

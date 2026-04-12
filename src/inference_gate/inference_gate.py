@@ -28,7 +28,8 @@ class InferenceGate:
     def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
                  upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
                  web_ui_port: int = 8081, non_streaming_models: list[str] | None = None, fuzzy_model: bool = False,
-                 fuzzy_sampling: str = "off", max_non_greedy_replies: int = 5, upstream_timeout: float = 120.0) -> None:
+                 fuzzy_sampling: str = "off", max_non_greedy_replies: int = 5, upstream_timeout: float = 120.0,
+                 proxy: str | None = None) -> None:
         """
         Initialize InferenceGate with configuration.
 
@@ -45,6 +46,8 @@ class InferenceGate:
         `fuzzy_sampling` controls sampling parameter fuzzy matching: "off", "soft", or "aggressive".
         `max_non_greedy_replies` is the max replies to collect per non-greedy cassette.
         `upstream_timeout` is the timeout in seconds for upstream API requests.
+        `proxy` is an optional HTTP proxy URL for routing upstream requests
+        through a proxy server (e.g. ``"http://127.0.0.1:8888/"``).
         """
         self.log = logging.getLogger("InferenceGate")
         self.host = host
@@ -60,6 +63,7 @@ class InferenceGate:
         self.fuzzy_sampling = fuzzy_sampling
         self.max_non_greedy_replies = max_non_greedy_replies
         self.upstream_timeout = upstream_timeout
+        self.proxy = proxy
 
         # Components (created during start)
         self._storage: CacheStorage | None = None
@@ -78,7 +82,8 @@ class InferenceGate:
 
         # OutflowClient is only needed for RECORD_AND_REPLAY mode
         if self.mode == Mode.RECORD_AND_REPLAY:
-            self._outflow = OutflowClient(upstream_base_url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout)
+            self._outflow = OutflowClient(upstream_base_url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout,
+                                          proxy=self.proxy)
         else:
             self._outflow = None
 

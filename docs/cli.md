@@ -37,6 +37,7 @@ inference-gate start [OPTIONS]
 | `--upstream` | `-u` | Upstream OpenAI API base URL | https://api.openai.com |
 | `--api-key` | `-k` | OpenAI API key | $OPENAI_API_KEY |
 | `--upstream-timeout` | | Timeout in seconds for upstream API requests before 504 | 120.0 |
+| `--proxy` | | HTTP proxy URL for upstream requests | none |
 | `--verbose` | `-v` | Enable verbose (DEBUG) logging | false |
 
 **Example:**
@@ -50,6 +51,9 @@ inference-gate start --port 9000 --verbose
 
 # Custom upstream endpoint (e.g., Azure OpenAI)
 inference-gate start --upstream https://my-resource.openai.azure.com
+
+# Route upstream requests through an HTTP proxy
+inference-gate start --proxy http://127.0.0.1:8888/
 ```
 
 ### `replay` - Replay-Only Mode
@@ -464,6 +468,87 @@ inference-gate cassette reindex [OPTIONS]
 ```bash
 inference-gate cassette reindex
 ```
+
+### `cassette fill` - Fill Cassette with Unique Completions
+
+Re-issue the original request to the upstream endpoint to collect additional unique completions for a non-greedy cassette. Responses are de-duplicated by content hash, so identical completions are never stored twice.
+
+This is useful when you have a cassette with only one or few recorded completions and want to fill it up to a target count for testing variation in non-deterministic (non-greedy) sampling scenarios.
+
+**Behavior:**
+- Reconstructs the original request from the tape's metadata and message sections
+- Sends the request to the upstream endpoint repeatedly until the target count is reached
+- De-duplicates responses by content hash — identical completions are discarded
+- Only works with non-greedy cassettes (temperature > 0)
+- Stops when the target is reached or when max attempts are exhausted
+- Updates the cassette's `max_replies` if the target exceeds the current value
+
+```bash
+inference-gate cassette fill CASSETTE_ID [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--count` | `-n` | Target number of unique completions | max_non_greedy_replies from config |
+| `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+| `--upstream` | `-u` | Upstream OpenAI API base URL | from config |
+| `--api-key` | `-k` | OpenAI API key | $OPENAI_API_KEY |
+| `--upstream-timeout` | | Timeout in seconds for upstream requests | 120.0 |
+| `--proxy` | | HTTP proxy URL for upstream requests | from config |
+| `--max-attempts` | | Maximum upstream requests before giving up | 3x target count |
+| `--json` | | Output as JSON | false |
+| `--verbose` | `-v` | Enable verbose (DEBUG) logging | false |
+
+**Example:**
+
+```bash
+# Fill cassette to 5 unique completions (default)
+inference-gate fill 6c72599f3142 --api-key sk-...
+
+# Fill to specific count
+inference-gate cassette fill 6c72 --count 10
+
+# Use custom upstream endpoint
+inference-gate cassette fill 6c72 --upstream http://localhost:8000 --api-key test-key
+
+# JSON output for programmatic use
+inference-gate cassette fill 6c72 --count 5 --json
+```
+
+**Human Output:**
+
+```
+Cassette: 6c72599f3142
+  Model: gpt-4
+  Existing replies: 1
+  Target: 5
+  Need: 4 more unique completions
+  Max attempts: 12
+  Upstream: https://api.openai.com
+
+Done: 4 new unique completions added (2 duplicates, 0 errors in 6 attempts)
+Cassette now has 5 replies
+```
+
+**JSON Output:**
+
+```json
+{
+  "content_hash": "6c72599f3142",
+  "added": 4,
+  "duplicates": 2,
+  "errors": 0,
+  "attempts": 6,
+  "total_replies": 5,
+  "target": 5
+}
+```
+
+**Exit Codes:**
+- `0` - Command completed (check `added` count for actual result)
+- `1` - Invalid input (greedy cassette, not found, no API key)
 
 ## Configuration Commands
 

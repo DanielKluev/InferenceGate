@@ -212,3 +212,6 @@ __marimo__/
 .inference_cache/
 .test_cache/
 
+# Local settings files
+.vscode/settings.json
+configs/

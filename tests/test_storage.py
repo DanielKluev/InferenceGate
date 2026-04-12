@@ -521,3 +521,169 @@ class TestGetDiskSize:
         storage.put(_make_entry(message="Size test"))
         size = storage.get_disk_size()
         assert size > 0
+
+
+class TestReconstructRequestBody:
+    """Tests for CacheStorage.reconstruct_request_body()."""
+
+    def test_basic_reconstruction(self, storage):
+        """Test that a simple chat completion request body is reconstructed from tape."""
+        entry = _make_entry(model="gpt-4", message="Hello world", temperature=0.7)
+        content_hash = storage.put(entry)
+
+        body = storage.reconstruct_request_body(content_hash)
+        assert body is not None
+        assert body["model"] == "gpt-4"
+        assert body["temperature"] == 0.7
+        assert len(body["messages"]) == 1
+        assert body["messages"][0]["role"] == "user"
+        assert body["messages"][0]["content"] == "Hello world"
+
+    def test_reconstruction_with_system_message(self, storage):
+        """Test reconstruction of request with system + user messages."""
+        entry = CacheEntry(
+            request=CachedRequest(
+                method="POST", path="/v1/chat/completions", headers={}, body={
+                    "model": "gpt-4",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are helpful."
+                        },
+                        {
+                            "role": "user",
+                            "content": "Hi"
+                        },
+                    ],
+                    "temperature": 0.5,
+                }),
+            response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+                "message": {
+                    "content": "Hello!"
+                }
+            }]}),
+            model="gpt-4",
+        )
+        content_hash = storage.put(entry)
+
+        body = storage.reconstruct_request_body(content_hash)
+        assert body is not None
+        assert len(body["messages"]) == 2
+        assert body["messages"][0]["role"] == "system"
+        assert body["messages"][0]["content"] == "You are helpful."
+        assert body["messages"][1]["role"] == "user"
+        assert body["messages"][1]["content"] == "Hi"
+
+    def test_reconstruction_with_sampling_params(self, storage):
+        """Test that sampling parameters (top_p, top_k, etc.) are reconstructed."""
+        entry = CacheEntry(
+            request=CachedRequest(
+                method="POST", path="/v1/chat/completions", headers={}, body={
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": "Test"
+                    }],
+                    "temperature": 0.8,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                    "max_tokens": 200,
+                }),
+            response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+                "message": {
+                    "content": "OK"
+                }
+            }]}),
+            model="test-model",
+        )
+        content_hash = storage.put(entry)
+
+        body = storage.reconstruct_request_body(content_hash)
+        assert body is not None
+        assert body["temperature"] == 0.8
+        assert body["top_p"] == 0.9
+        assert body["top_k"] == 40
+        assert body["max_tokens"] == 200
+
+    def test_reconstruction_with_tools(self, storage):
+        """Test that tool definitions are reconstructed from the tape."""
+        tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+        entry = CacheEntry(
+            request=CachedRequest(
+                method="POST", path="/v1/chat/completions", headers={}, body={
+                    "model": "gpt-4",
+                    "messages": [{
+                        "role": "user",
+                        "content": "Weather?"
+                    }],
+                    "tools": tools,
+                    "temperature": 0.5,
+                }),
+            response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+                "message": {
+                    "content": "Sunny"
+                }
+            }]}),
+            model="gpt-4",
+        )
+        content_hash = storage.put(entry)
+
+        body = storage.reconstruct_request_body(content_hash)
+        assert body is not None
+        assert "tools" in body
+        assert body["tools"] == tools
+
+    def test_reconstruction_nonexistent(self, storage):
+        """Test that reconstruct_request_body returns None for a nonexistent cassette."""
+        body = storage.reconstruct_request_body("nonexistent123")
+        assert body is None
+
+    def test_reconstruction_with_stop_sequences(self, storage):
+        """Test that stop sequences are reconstructed."""
+        entry = CacheEntry(
+            request=CachedRequest(
+                method="POST", path="/v1/chat/completions", headers={}, body={
+                    "model": "gpt-4",
+                    "messages": [{
+                        "role": "user",
+                        "content": "Test"
+                    }],
+                    "stop": ["\n", "END"],
+                    "temperature": 0.5,
+                }),
+            response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+                "message": {
+                    "content": "OK"
+                }
+            }]}),
+            model="gpt-4",
+        )
+        content_hash = storage.put(entry)
+
+        body = storage.reconstruct_request_body(content_hash)
+        assert body is not None
+        assert body["stop"] == ["\n", "END"]
+
+
+class TestUpdateMaxReplies:
+    """Tests for CacheStorage._update_max_replies()."""
+
+    def test_update_max_replies(self, storage):
+        """Test that max_replies is updated in tape metadata and index."""
+        entry = _make_entry(model="gpt-4", message="Update max", temperature=0.7)
+        content_hash = storage.put(entry, max_replies=5)
+
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row.max_replies == 5
+
+        storage._update_max_replies(content_hash, 10)
+
+        # Verify index is updated
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row.max_replies == 10
+
+        # Verify tape metadata is updated
+        tape_data = storage.load_tape(content_hash)
+        assert tape_data is not None
+        metadata, _ = tape_data
+        assert metadata.max_replies == 10

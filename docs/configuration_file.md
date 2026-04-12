@@ -41,6 +41,7 @@ port: 8080
 upstream: "http://10.100.3.38:8000/"
 cache_dir: caches/my_project
 verbose: false
+proxy: "http://127.0.0.1:8888/"
 upstream_timeout: 300.0
 fuzzy_model: false
 fuzzy_sampling: "off"
@@ -69,6 +70,7 @@ api_key: "sk-..."
 | `upstream` | string | `https://api.openai.com` | Base URL of the upstream AI API endpoint. Can be any OpenAI-compatible API. |
 | `api_key` | string | `null` | API key for upstream authentication. Sent as a `Bearer` token in the `Authorization` header. Falls back to the `OPENAI_API_KEY` environment variable if not set. **Note:** For security, this field is excluded when saving the config file via `config init`. |
 | `upstream_timeout` | float | `120.0` | Timeout in seconds for upstream API requests. If an upstream request takes longer than this, InferenceGate returns a `504 Gateway Timeout` to the client. Increase this for long-running inference tasks (e.g. large reasoning models). |
+| `proxy` | string | `null` | Optional HTTP proxy URL for routing upstream requests through a proxy server (e.g. `http://127.0.0.1:8888/`). When set, all outbound requests to the upstream AI endpoint are sent via the specified proxy. Useful for debugging with tools like mitmproxy or for network environments that require a proxy. |
 
 ### Storage Settings
 

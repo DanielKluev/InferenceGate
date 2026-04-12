@@ -88,6 +88,12 @@ _OPTION_DEFS: dict[str, dict[str, Any]] = {
         "ini": "inferencegate_max_non_greedy_replies",
         "default": "5",
     },
+    "proxy": {
+        "cli": "--inferencegate-proxy",
+        "env": "INFERENCEGATE_PROXY",
+        "ini": "inferencegate_proxy",
+        "default": None,
+    },
 }
 
 
@@ -139,12 +145,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption("--inferencegate-port", default=None, help="Proxy server port. 0 = OS-assigned (default: 0).")
     group.addoption("--inferencegate-fuzzy-model", action="store_true", dest="inferencegate_fuzzy_model", default=None,
                     help="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model.")
-    group.addoption("--no-inferencegate-fuzzy-model", action="store_false", dest="inferencegate_fuzzy_model",
-                    default=None, help="Disable fuzzy model matching, overriding ini/env settings for a single test run.")
+    group.addoption("--no-inferencegate-fuzzy-model", action="store_false", dest="inferencegate_fuzzy_model", default=None,
+                    help="Disable fuzzy model matching, overriding ini/env settings for a single test run.")
     group.addoption("--inferencegate-fuzzy-sampling", default=None, choices=["off", "soft", "aggressive"],
                     help="Sampling parameter fuzzy matching level: off, soft, or aggressive.")
     group.addoption("--inferencegate-max-non-greedy-replies", default=None, type=int,
                     help="Max replies to collect per non-greedy cassette before cycling (default: 5).")
+    group.addoption("--inferencegate-proxy", default=None, help="HTTP proxy URL for upstream requests (e.g. http://127.0.0.1:8888/).")
 
     parser.addini("inferencegate_mode", default="", help="InferenceGate operating mode: replay or record.")
     parser.addini("inferencegate_cache_dir", default="", help="Directory for cached cassettes.")
@@ -153,6 +160,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini("inferencegate_fuzzy_model", default="", help="Enable fuzzy model matching (true/false).")
     parser.addini("inferencegate_fuzzy_sampling", default="", help="Sampling fuzzy matching level: off, soft, or aggressive.")
     parser.addini("inferencegate_max_non_greedy_replies", default="", help="Max replies per non-greedy cassette.")
+    parser.addini("inferencegate_proxy", default="", help="HTTP proxy URL for upstream requests.")
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -279,6 +287,7 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
     fuzzy_sampling = str(_resolve_option(config, "fuzzy_sampling") or "off")
     max_replies_raw = _resolve_option(config, "max_non_greedy_replies")
     max_non_greedy_replies = int(max_replies_raw) if max_replies_raw is not None else 5
+    proxy = _resolve_option(config, "proxy") or None
 
     # Map user-facing mode names to internal Mode enum
     if mode_str == "record":
@@ -290,6 +299,7 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
     upstream_base_url = "https://api.openai.com"
     api_key = None
     non_streaming_models: list[str] = []
+    cfg_proxy: str | None = None
     if mode == Mode.RECORD_AND_REPLAY:
         try:
             cfg_manager = ConfigManager(config_path=config_path)
@@ -297,12 +307,16 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
             upstream_base_url = cfg.upstream
             api_key = cfg.api_key
             non_streaming_models = cfg.non_streaming_models
+            cfg_proxy = cfg.proxy
         except Exception:
             log.warning("Could not load InferenceGate config file; using defaults for record mode")
 
+    # CLI/env/ini proxy overrides config file proxy
+    actual_proxy = proxy if proxy is not None else cfg_proxy
+
     gate = InferenceGate(host="127.0.0.1", port=port, mode=mode, cache_dir=cache_dir, upstream_base_url=upstream_base_url, api_key=api_key,
                          non_streaming_models=non_streaming_models, fuzzy_model=fuzzy_model, fuzzy_sampling=fuzzy_sampling,
-                         max_non_greedy_replies=max_non_greedy_replies)
+                         max_non_greedy_replies=max_non_greedy_replies, proxy=actual_proxy)
 
     server_thread = _ServerThread(gate)
     server_thread.start()

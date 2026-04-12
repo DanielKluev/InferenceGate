@@ -1,6 +1,7 @@
 """Tests for InferenceGate CLI module."""
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -90,6 +91,7 @@ class TestCassetteCommands:
         assert "delete" in result.output
         assert "stats" in result.output
         assert "reindex" in result.output
+        assert "fill" in result.output
 
     def test_cassette_list_empty(self, runner, temp_cache_dir):
         """Test that listing empty cache shows 'No cassettes found'."""
@@ -448,3 +450,166 @@ class TestConfigCommands:
         result = runner.invoke(main, ["--config", str(config_path), "config", "path"])
         assert result.exit_code == 0
         assert str(config_path) in result.output
+
+
+class TestCassetteFillCommand:
+    """Tests for the cassette fill command."""
+
+    @staticmethod
+    def _store_non_greedy_entry(cache_dir: str, model: str = "gpt-4", message: str = "Hello", temperature: float = 0.7,
+                                max_replies: int = 5) -> str:
+        """Helper to store a non-greedy cassette entry and return its content_hash."""
+        storage = CacheStorage(cache_dir)
+        entry = CacheEntry(
+            request=CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": message
+                }],
+                "temperature": temperature,
+            }),
+            response=CachedResponse(
+                status_code=200, headers={}, body={
+                    "choices": [{
+                        "message": {
+                            "content": f"Reply 1 to: {message}"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 20
+                    },
+                }),
+            model=model,
+            temperature=temperature,
+        )
+        return storage.put(entry, max_replies=max_replies)
+
+    def test_fill_help(self, runner):
+        """Test that cassette fill --help shows correct options."""
+        result = runner.invoke(main, ["cassette", "fill", "--help"])
+        assert result.exit_code == 0
+        assert "count" in result.output
+        assert "upstream" in result.output
+        assert "api-key" in result.output
+        assert "non-greedy" in result.output.lower()
+
+    def test_fill_greedy_cassette_rejected(self, runner, temp_cache_dir):
+        """Test that fill rejects greedy cassettes (temperature=0)."""
+        storage = CacheStorage(temp_cache_dir)
+        entry = CacheEntry(
+            request=CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Greedy test"
+                }],
+                "temperature": 0.0,
+            }),
+            response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+                "message": {
+                    "content": "OK"
+                }
+            }]}),
+            model="gpt-4",
+        )
+        content_hash = storage.put(entry)
+
+        result = runner.invoke(main, ["cassette", "fill", content_hash, "--cache-dir", temp_cache_dir, "--api-key", "test-key"])
+        assert result.exit_code == 1
+        assert "greedy" in result.output.lower()
+
+    def test_fill_nonexistent_cassette(self, runner, temp_cache_dir):
+        """Test that fill fails for non-existent cassette."""
+        result = runner.invoke(main, ["cassette", "fill", "nonexistent123", "--cache-dir", temp_cache_dir, "--api-key", "test-key"])
+        assert result.exit_code == 1
+        assert "no cassette found" in result.output.lower()
+
+    def test_fill_no_api_key(self, runner, temp_cache_dir, tmp_path):
+        """Test that fill fails without API key."""
+        content_hash = self._store_non_greedy_entry(temp_cache_dir)
+        config_path = tmp_path / "empty_config.yaml"
+        config_path.write_text(f"cache_dir: {temp_cache_dir}\n")
+
+        result = runner.invoke(main,
+                               ["--config", str(config_path), "cassette", "fill", content_hash, "--cache-dir", temp_cache_dir],
+                               env={"OPENAI_API_KEY": ""})
+        assert result.exit_code == 1
+        assert "No API key" in result.output
+
+    def test_fill_already_full(self, runner, temp_cache_dir):
+        """Test that fill reports nothing to do when cassette already has enough replies."""
+        content_hash = self._store_non_greedy_entry(temp_cache_dir, max_replies=1)
+
+        result = runner.invoke(main,
+                               ["cassette", "fill", content_hash, "--cache-dir", temp_cache_dir, "--api-key", "test-key", "--count", "1"])
+        assert result.exit_code == 0
+        assert "Nothing to do" in result.output
+
+    @patch("inference_gate.cli._fill_cassette")
+    def test_fill_calls_fill_function(self, mock_fill, runner, temp_cache_dir):
+        """Test that fill command calls the async fill function with correct parameters."""
+        content_hash = self._store_non_greedy_entry(temp_cache_dir, message="Fill me up")
+
+        mock_fill.return_value = {
+            "content_hash": content_hash,
+            "added": 3,
+            "duplicates": 1,
+            "errors": 0,
+            "attempts": 4,
+            "total_replies": 4,
+            "target": 5,
+        }
+
+        result = runner.invoke(main, [
+            "cassette", "fill", content_hash, "--cache-dir", temp_cache_dir, "--api-key", "test-key", "--count", "5", "--upstream",
+            "http://localhost:8000"
+        ])
+        assert result.exit_code == 0
+        assert "3 new unique completions added" in result.output
+        assert "1 duplicates" in result.output
+        assert mock_fill.called
+
+    @patch("inference_gate.cli._fill_cassette")
+    def test_fill_json_output(self, mock_fill, runner, temp_cache_dir):
+        """Test that fill command with --json outputs valid JSON."""
+        content_hash = self._store_non_greedy_entry(temp_cache_dir, message="JSON fill test")
+
+        mock_fill.return_value = {
+            "content_hash": content_hash,
+            "added": 2,
+            "duplicates": 0,
+            "errors": 0,
+            "attempts": 2,
+            "total_replies": 3,
+            "target": 5,
+        }
+
+        result = runner.invoke(main, ["cassette", "fill", content_hash, "--cache-dir", temp_cache_dir, "--api-key", "test-key", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["added"] == 2
+        assert data["total_replies"] == 3
+
+    @patch("inference_gate.cli._fill_cassette")
+    def test_fill_with_errors(self, mock_fill, runner, temp_cache_dir):
+        """Test that fill command reports errors from upstream."""
+        content_hash = self._store_non_greedy_entry(temp_cache_dir, message="Error fill test")
+
+        mock_fill.return_value = {
+            "content_hash": content_hash,
+            "added": 1,
+            "duplicates": 0,
+            "errors": 3,
+            "attempts": 4,
+            "total_replies": 2,
+            "target": 5,
+        }
+
+        result = runner.invoke(main,
+                               ["cassette", "fill", content_hash, "--cache-dir", temp_cache_dir, "--api-key", "test-key", "--count", "5"])
+        assert result.exit_code == 0
+        assert "3 errors" in result.output
+        assert "Warning" in result.output

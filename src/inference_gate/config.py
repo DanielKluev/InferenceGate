@@ -31,6 +31,8 @@ class Config(BaseModel):
     # Upstream API settings
     upstream: str = Field(default="https://api.openai.com", description="Upstream OpenAI API base URL")
     api_key: str | None = Field(default=None, description="OpenAI API key")
+    proxy: str | None = Field(default=None, description="Optional HTTP proxy URL for upstream requests "
+                              "(e.g. 'http://127.0.0.1:8888/')")
 
     # Storage settings
     cache_dir: str = Field(default=".inference_cache", description="Directory to store cached responses")
@@ -47,17 +49,18 @@ class Config(BaseModel):
                                     description="Timeout in seconds for upstream API requests before returning 504 Gateway Timeout")
 
     # Fuzzy matching (independent toggles replacing old fuzzy_model_matching)
-    fuzzy_model: bool = Field(default=False, description="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt "
-                              "but a different model")
-    fuzzy_sampling: str = Field(default="off",
-                                description="Sampling parameter fuzzy matching level: "
-                                "'off' (exact only), 'soft' (non-greedy matches non-greedy), "
-                                "'aggressive' (greedy and non-greedy may match)")
+    fuzzy_model: bool = Field(
+        default=False, description="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt "
+        "but a different model")
+    fuzzy_sampling: str = Field(
+        default="off", description="Sampling parameter fuzzy matching level: "
+        "'off' (exact only), 'soft' (non-greedy matches non-greedy), "
+        "'aggressive' (greedy and non-greedy may match)")
 
     # Multi-reply settings for non-greedy sampling
-    max_non_greedy_replies: int = Field(default=5,
-                                        description="Maximum number of replies to collect per non-greedy cassette "
-                                        "before switching to replay cycling")
+    max_non_greedy_replies: int = Field(
+        default=5, description="Maximum number of replies to collect per non-greedy cassette "
+        "before switching to replay cycling")
 
     # Test command settings
     test_prompt: str = Field(

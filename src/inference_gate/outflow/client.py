@@ -23,18 +23,21 @@ class OutflowClient:
     started and stopped via `start()` and `stop()`.
     """
 
-    def __init__(self, upstream_base_url: str, api_key: str | None = None, timeout: float = 120.0) -> None:
+    def __init__(self, upstream_base_url: str, api_key: str | None = None, timeout: float = 120.0, proxy: str | None = None) -> None:
         """
         Initialize the outflow client.
 
         `upstream_base_url` is the base URL of the upstream AI API (e.g. "https://api.openai.com").
         Optional `api_key` is used for Bearer token authentication.
         `timeout` controls the total request timeout in seconds.
+        `proxy` is an optional HTTP proxy URL (e.g. ``"http://127.0.0.1:8888/"``).
+        When set, all upstream requests are routed through the specified proxy server.
         """
         self.log = logging.getLogger("OutflowClient")
         self.upstream_base_url = upstream_base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.proxy = proxy
         self._session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
@@ -42,7 +45,7 @@ class OutflowClient:
         Start the outflow client by creating the HTTP session.
         """
         self._session = aiohttp.ClientSession(timeout=self.timeout)
-        self.log.info("OutflowClient started, upstream: %s", self.upstream_base_url)
+        self.log.info("OutflowClient started, upstream: %s (proxy: %s)", self.upstream_base_url, self.proxy or "none")
 
     async def stop(self) -> None:
         """
@@ -122,6 +125,8 @@ class OutflowClient:
         kwargs: dict[str, Any] = {"headers": headers}
         if body is not None:
             kwargs["json"] = body
+        if self.proxy:
+            kwargs["proxy"] = self.proxy
 
         async with session.request(method, url, **kwargs) as resp:
             response_headers = {k: v for k, v in resp.headers.items() if k.lower() in ("content-type",)}
@@ -145,6 +150,8 @@ class OutflowClient:
         kwargs: dict[str, Any] = {"headers": headers}
         if body is not None:
             kwargs["json"] = body
+        if self.proxy:
+            kwargs["proxy"] = self.proxy
 
         chunks: list[str] = []
         async with session.request(method, url, **kwargs) as resp:
