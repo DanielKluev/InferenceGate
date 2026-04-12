@@ -103,9 +103,21 @@ def reassemble_chat_completion(chunks: list[str]) -> dict[str, Any]:
             if choice_delta.get("finish_reason") is not None:
                 choice["finish_reason"] = choice_delta["finish_reason"]
 
-            # Update logprobs
+            # Accumulate logprobs (each streaming chunk carries one token's logprobs)
             if choice_delta.get("logprobs") is not None:
-                choice["logprobs"] = choice_delta["logprobs"]
+                delta_logprobs = choice_delta["logprobs"]
+                if choice["logprobs"] is None:
+                    choice["logprobs"] = {}
+                # Accumulate content-level token logprobs
+                if delta_logprobs.get("content") is not None:
+                    if "content" not in choice["logprobs"]:
+                        choice["logprobs"]["content"] = []
+                    choice["logprobs"]["content"].extend(delta_logprobs["content"])
+                # Accumulate refusal-level token logprobs
+                if delta_logprobs.get("refusal") is not None:
+                    if "refusal" not in choice["logprobs"]:
+                        choice["logprobs"]["refusal"] = []
+                    choice["logprobs"]["refusal"].extend(delta_logprobs["refusal"])
 
             # Merge delta into message
             _merge_delta_into_message(choice["message"], delta)
@@ -229,17 +241,98 @@ def reassemble_responses_api(chunks: list[str]) -> dict[str, Any]:
     return {}
 
 
+def reassemble_text_completion(chunks: list[str]) -> dict[str, Any]:
+    """
+    Reassemble streaming text Completions SSE chunks into a single non-streaming response.
+
+    Handles the ``/v1/completions`` endpoint format where choices carry ``text``
+    (concatenated) rather than ``delta.content``. Also preserves ``prompt_logprobs``
+    (vLLM-specific, sent in the first chunk) and accumulates per-token ``logprobs``.
+
+    Returns a dict matching the shape of a non-streaming ``text_completion`` response.
+    """
+    events = _parse_sse_events(chunks)
+    if not events:
+        return {}
+
+    first = events[0]
+    result: dict[str, Any] = {
+        "id": first.get("id", ""),
+        "object": "text_completion",
+        "created": first.get("created", 0),
+        "model": first.get("model", ""),
+        "system_fingerprint": first.get("system_fingerprint"),
+    }
+
+    choices_map: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] | None = None
+
+    for event in events:
+        if event.get("usage"):
+            usage = event["usage"]
+
+        for choice_delta in event.get("choices", []):
+            idx = choice_delta.get("index", 0)
+
+            if idx not in choices_map:
+                choices_map[idx] = {
+                    "index": idx,
+                    "text": "",
+                    "finish_reason": None,
+                    "logprobs": None,
+                    "prompt_logprobs": None,
+                }
+
+            choice = choices_map[idx]
+
+            # Concatenate text fragments
+            text_part = choice_delta.get("text")
+            if text_part is not None:
+                choice["text"] += text_part
+
+            # Update finish_reason
+            if choice_delta.get("finish_reason") is not None:
+                choice["finish_reason"] = choice_delta["finish_reason"]
+
+            # Capture prompt_logprobs (vLLM sends full list in the first chunk)
+            if choice_delta.get("prompt_logprobs") is not None:
+                choice["prompt_logprobs"] = choice_delta["prompt_logprobs"]
+
+            # Accumulate generation logprobs
+            delta_logprobs = choice_delta.get("logprobs")
+            if delta_logprobs is not None:
+                if choice["logprobs"] is None:
+                    choice["logprobs"] = {}
+                # OpenAI text completions logprobs format: tokens, token_logprobs, top_logprobs, text_offset
+                for key in ("tokens", "token_logprobs", "top_logprobs", "text_offset"):
+                    if key in delta_logprobs and delta_logprobs[key] is not None:
+                        if key not in choice["logprobs"]:
+                            choice["logprobs"][key] = []
+                        choice["logprobs"][key].extend(delta_logprobs[key])
+
+    result["choices"] = [choices_map[idx] for idx in sorted(choices_map.keys())]
+
+    if usage:
+        result["usage"] = usage
+
+    return result
+
+
 def reassemble_streaming_response(chunks: list[str], path: str) -> dict[str, Any]:
     """
     Reassemble streaming chunks into a non-streaming response, dispatching by API path.
 
     Uses `reassemble_chat_completion` for Chat Completions API paths
-    (`/v1/chat/completions` or similar) and `reassemble_responses_api`
-    for Responses API paths (`/v1/responses` or similar).
+    (`/v1/chat/completions` or similar), `reassemble_responses_api`
+    for Responses API paths (`/v1/responses` or similar), and
+    `reassemble_text_completion` for text Completions API paths
+    (`/v1/completions` or similar).
 
     Returns a dict with the reassembled non-streaming response body.
     """
     if "/responses" in path:
         return reassemble_responses_api(chunks)
-    # Default to Chat Completions reassembly (covers /v1/chat/completions and similar)
+    if "/completions" in path and "/chat/completions" not in path:
+        return reassemble_text_completion(chunks)
+    # Default to Chat Completions reassembly
     return reassemble_chat_completion(chunks)

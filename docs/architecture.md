@@ -14,7 +14,11 @@ The Router component is responsible for determining how to handle incoming reque
 
 ### Streaming-First Design
 
-The Router implements a **streaming-first** strategy: on cache miss, all requests sent to the upstream API are forced to use `stream: true` (with `stream_options.include_usage: true` to preserve token usage data). This means every cassette is recorded as a streaming response with SSE chunks, regardless of whether the original client requested streaming or non-streaming.
+The Router implements a **streaming-first** strategy: on cache miss, requests sent to the upstream API are forced to use `stream: true` (with `stream_options.include_usage: true` to preserve token usage data). This only applies to **generation endpoints** that support streaming and have matching reassembly logic:
+- `/v1/chat/completions`
+- `/v1/responses` (and `/responses`)
+
+Non-generation endpoints such as `/tokenize`, `/detokenize`, `/v1/models`, and `/v1/completions` are **not** forced to stream. They are proxied as-is and cached as standard JSON responses. This avoids corrupting responses from endpoints that don't return SSE streams.
 
 When a response is served back to the client (from cache or live), the Inflow server **adapts** the format to match the client's original `stream` preference:
 - If the client requested `stream: true`, SSE chunks are returned directly.
@@ -28,7 +32,7 @@ Models that do not support streaming can be exempted via the `non_streaming_mode
 
 Handles the storage of captured inferences. Provides functionality to save incoming requests and their corresponding responses to a local database for future replay, and to retrieve stored inferences when requested by the Router.
 
-The `reassembly` submodule converts streaming SSE chunks into non-streaming JSON response bodies when a non-streaming client replays a streaming cassette. It supports both the Chat Completions API and the Responses API.
+The `reassembly` submodule converts streaming SSE chunks into non-streaming JSON response bodies when a non-streaming client replays a streaming cassette. It supports the Chat Completions API, the Responses API, and the text Completions API (`/v1/completions`).
 
 ## Outflow Component (src/inference_gate/outflow/)
 

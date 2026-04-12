@@ -14,6 +14,17 @@ from inference_gate.modes import Mode
 from inference_gate.outflow.client import OutflowClient
 from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
+# Paths where the proxy may force ``stream=True`` on upstream requests.
+# These *must* have a matching reassembly function in ``recording.reassembly``
+# so that a single streaming cassette can serve both streaming and
+# non-streaming clients.  All other paths (``/tokenize``, ``/detokenize``,
+# ``/v1/models``, ``/v1/completions``, etc.) are forwarded as-is.
+_FORCE_STREAMING_PATH_PREFIXES: tuple[str, ...] = (
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/responses",
+)
+
 
 class Router:
     """
@@ -22,8 +33,9 @@ class Router:
     In `RECORD_AND_REPLAY` mode, checks cache first and returns cached response
     if available. On cache miss, forwards to upstream via OutflowClient, records
     the response, and returns it. Requests are forced to use streaming when sent
-    upstream (unless the model is in `non_streaming_models`) so that a single
-    streaming cassette can serve both streaming and non-streaming clients.
+    upstream (unless the model is in `non_streaming_models` or the path does not
+    support streaming) so that a single streaming cassette can serve both
+    streaming and non-streaming clients.
 
     In `REPLAY_ONLY` mode, only returns cached responses. Returns an error
     response on cache miss.
@@ -180,9 +192,11 @@ class Router:
         if cached_request.body and isinstance(cached_request.body, dict):
             original_client_streaming = cached_request.body.get("stream", False)
 
-        # Force streaming on the upstream request unless the model is excluded
+        # Force streaming on the upstream request unless the model or path is excluded
         model_name = cached_request.body.get("model") if cached_request.body else None
-        should_force_streaming = model_name not in self.non_streaming_models if model_name else True
+        path_supports_streaming = cached_request.path.startswith(_FORCE_STREAMING_PATH_PREFIXES)
+        model_supports_streaming = model_name not in self.non_streaming_models if model_name else True
+        should_force_streaming = path_supports_streaming and model_supports_streaming
 
         if should_force_streaming and cached_request.body is not None and isinstance(cached_request.body, dict):
             cached_request.body["stream"] = True

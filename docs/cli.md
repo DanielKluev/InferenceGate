@@ -36,6 +36,7 @@ inference-gate start [OPTIONS]
 | `--cache-dir` | `-c` | Directory to store cached responses | .inference_cache |
 | `--upstream` | `-u` | Upstream OpenAI API base URL | https://api.openai.com |
 | `--api-key` | `-k` | OpenAI API key | $OPENAI_API_KEY |
+| `--upstream-timeout` | | Timeout in seconds for upstream API requests before 504 | 120.0 |
 | `--verbose` | `-v` | Enable verbose (DEBUG) logging | false |
 
 **Example:**

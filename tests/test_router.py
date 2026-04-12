@@ -573,3 +573,155 @@ class TestFuzzyModelMatching:
             headers={},
         )
         assert response.status_code == 503
+
+
+class TestPathBasedStreamingControl:
+    """Tests for path-based streaming control — streaming is only forced on generation endpoints."""
+
+    async def test_tokenize_not_forced_to_stream(self, storage, mock_outflow):
+        """Test that /tokenize requests are NOT forced to stream upstream."""
+        mock_outflow.forward_request = AsyncMock(return_value=CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={"tokens": [1, 2, 3]},
+            is_streaming=False,
+        ))
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow)
+
+        await router.route_request(
+            method="POST",
+            path="/tokenize",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "qwen3-4b-it",
+                "prompt": "Hello world"
+            },
+        )
+
+        call_args = mock_outflow.forward_request.call_args
+        forwarded_request = call_args[0][0]
+        assert "stream" not in forwarded_request.body
+
+    async def test_detokenize_not_forced_to_stream(self, storage, mock_outflow):
+        """Test that /detokenize requests are NOT forced to stream upstream."""
+        mock_outflow.forward_request = AsyncMock(return_value=CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={"prompt": "Hello world"},
+            is_streaming=False,
+        ))
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow)
+
+        await router.route_request(
+            method="POST",
+            path="/detokenize",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "qwen3-4b-it",
+                "tokens": [1, 2, 3]
+            },
+        )
+
+        call_args = mock_outflow.forward_request.call_args
+        forwarded_request = call_args[0][0]
+        assert "stream" not in forwarded_request.body
+
+    async def test_v1_completions_not_forced_to_stream(self, storage, mock_outflow):
+        """Test that /v1/completions requests are NOT forced to stream upstream."""
+        mock_outflow.forward_request = AsyncMock(return_value=CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={
+                "id": "cmpl-1",
+                "choices": [{
+                    "text": "result",
+                    "prompt_logprobs": [None, {
+                        "1": {
+                            "logprob": -0.5
+                        }
+                    }]
+                }],
+            },
+            is_streaming=False,
+        ))
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow)
+
+        await router.route_request(
+            method="POST",
+            path="/v1/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "qwen3-4b-it",
+                "prompt": "Hello",
+                "prompt_logprobs": 3,
+                "max_tokens": 1
+            },
+        )
+
+        call_args = mock_outflow.forward_request.call_args
+        forwarded_request = call_args[0][0]
+        assert forwarded_request.body.get("stream") is not True
+
+    async def test_chat_completions_still_forced_to_stream(self, storage, mock_outflow):
+        """Test that /v1/chat/completions requests ARE still forced to stream upstream."""
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow)
+
+        await router.route_request(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "gpt-4",
+                "messages": [{
+                    "role": "user",
+                    "content": "Hello"
+                }]
+            },
+        )
+
+        call_args = mock_outflow.forward_request.call_args
+        forwarded_request = call_args[0][0]
+        assert forwarded_request.body["stream"] is True
+
+    async def test_responses_api_forced_to_stream(self, storage, mock_outflow):
+        """Test that /v1/responses requests ARE forced to stream upstream."""
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow)
+
+        await router.route_request(
+            method="POST",
+            path="/v1/responses",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "gpt-4",
+                "input": "Hello"
+            },
+        )
+
+        call_args = mock_outflow.forward_request.call_args
+        forwarded_request = call_args[0][0]
+        assert forwarded_request.body["stream"] is True
+
+    async def test_tokenize_response_body_preserved(self, storage, mock_outflow):
+        """Test that tokenize response body is preserved as-is (non-streaming JSON)."""
+        expected_body = {"tokens": [100, 200, 300, 400]}
+        mock_outflow.forward_request = AsyncMock(return_value=CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=expected_body,
+            is_streaming=False,
+        ))
+        router = Router(mode=Mode.RECORD_AND_REPLAY, storage=storage, outflow=mock_outflow)
+
+        response = await router.route_request(
+            method="POST",
+            path="/tokenize",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "qwen3-4b-it",
+                "prompt": "Hello world"
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.is_streaming is False
+        assert response.body == expected_body

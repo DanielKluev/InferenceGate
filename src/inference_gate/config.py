@@ -42,6 +42,10 @@ class Config(BaseModel):
     non_streaming_models: list[str] = Field(default_factory=list,
                                             description="Models that do not support streaming and should not be forced to stream")
 
+    # Upstream timeout
+    upstream_timeout: float = Field(default=120.0,
+                                    description="Timeout in seconds for upstream API requests before returning 504 Gateway Timeout")
+
     # Fuzzy model matching
     fuzzy_model_matching: bool = Field(
         default=False, description="Enable fuzzy model matching: on cache miss, look for entries with the same prompt "
