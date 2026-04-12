@@ -1,9 +1,12 @@
 """Tests for InferenceGate CLI module."""
 
+import json
+
 import pytest
 from click.testing import CliRunner
 
 from inference_gate.cli import main
+from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
 
 @pytest.fixture
@@ -50,26 +53,250 @@ class TestMainCommand:
         assert "replay-only" in result.output
 
 
-class TestCacheCommands:
-    """Tests for cache management commands."""
+class TestCassetteCommands:
+    """Tests for cassette management commands."""
 
-    def test_cache_list_empty(self, runner, temp_cache_dir):
-        """Test that listing empty cache shows 'No cached entries found'."""
-        result = runner.invoke(main, ["cache", "list", "--cache-dir", temp_cache_dir])
-        assert result.exit_code == 0
-        assert "No cached entries found" in result.output
+    @staticmethod
+    def _store_entry(cache_dir: str, model: str = "gpt-4", message: str = "Hello", temperature: float = 0) -> str:
+        """Helper to store a cassette entry and return its content_hash."""
+        storage = CacheStorage(cache_dir)
+        entry = CacheEntry(
+            request=CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": message
+                }],
+                "temperature": temperature
+            }),
+            response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+                "message": {
+                    "content": f"Reply to: {message}"
+                }
+            }]}),
+            model=model,
+            temperature=temperature,
+        )
+        return storage.put(entry)
 
-    def test_cache_info_empty(self, runner, temp_cache_dir):
-        """Test that cache info with empty cache shows 'Total entries: 0'."""
-        result = runner.invoke(main, ["cache", "info", "--cache-dir", temp_cache_dir])
+    def test_cassette_help(self, runner):
+        """Test that cassette --help shows available subcommands."""
+        result = runner.invoke(main, ["cassette", "--help"])
         assert result.exit_code == 0
-        assert "Total entries: 0" in result.output
+        assert "list" in result.output
+        assert "search" in result.output
+        assert "show" in result.output
+        assert "read" in result.output
+        assert "delete" in result.output
+        assert "stats" in result.output
+        assert "reindex" in result.output
 
-    def test_cache_clear_empty(self, runner, temp_cache_dir):
-        """Test that clearing empty cache shows 'No cached entries to clear'."""
-        result = runner.invoke(main, ["cache", "clear", "--cache-dir", temp_cache_dir, "-y"])
+    def test_cassette_list_empty(self, runner, temp_cache_dir):
+        """Test that listing empty cache shows 'No cassettes found'."""
+        result = runner.invoke(main, ["cassette", "list", "--cache-dir", temp_cache_dir])
         assert result.exit_code == 0
-        assert "No cached entries to clear" in result.output
+        assert "No cassettes found" in result.output
+
+    def test_cassette_list_with_entries(self, runner, temp_cache_dir):
+        """Test that listing cassettes shows stored entries in tabular format."""
+        self._store_entry(temp_cache_dir, model="gpt-4", message="What is Python?")
+        self._store_entry(temp_cache_dir, model="claude-3", message="Explain ML")
+
+        result = runner.invoke(main, ["cassette", "list", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "gpt-4" in result.output
+        assert "claude-3" in result.output
+        assert "2 cassette(s)" in result.output
+
+    def test_cassette_list_json(self, runner, temp_cache_dir):
+        """Test that --json flag outputs valid JSON array."""
+        self._store_entry(temp_cache_dir, message="JSON test")
+
+        result = runner.invoke(main, ["cassette", "list", "--cache-dir", temp_cache_dir, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert "id" in data[0]
+        assert "model" in data[0]
+
+    def test_cassette_list_filter_model(self, runner, temp_cache_dir):
+        """Test that --model flag filters by model name."""
+        self._store_entry(temp_cache_dir, model="gpt-4", message="GPT test")
+        self._store_entry(temp_cache_dir, model="claude-3", message="Claude test")
+
+        result = runner.invoke(main, ["cassette", "list", "--cache-dir", temp_cache_dir, "--model", "gpt", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        assert data[0]["model"] == "gpt-4"
+
+    def test_cassette_list_limit(self, runner, temp_cache_dir):
+        """Test that --limit caps the number of results."""
+        for i in range(5):
+            self._store_entry(temp_cache_dir, message=f"Limit entry {i}", model=f"model-{i}")
+
+        result = runner.invoke(main, ["cassette", "list", "--cache-dir", temp_cache_dir, "--limit", "2", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 2
+
+    def test_cassette_search(self, runner, temp_cache_dir):
+        """Test searching cassettes by message content."""
+        self._store_entry(temp_cache_dir, message="The quick brown fox")
+        self._store_entry(temp_cache_dir, message="Lazy dog sleeps")
+
+        result = runner.invoke(main, ["cassette", "search", "quick", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "quick" in result.output.lower()
+        assert "1 cassette(s)" in result.output
+
+    def test_cassette_search_json(self, runner, temp_cache_dir):
+        """Test search with --json output."""
+        self._store_entry(temp_cache_dir, message="Search target alpha")
+        self._store_entry(temp_cache_dir, message="Search target beta")
+
+        result = runner.invoke(main, ["cassette", "search", "search target", "--cache-dir", temp_cache_dir, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 2
+
+    def test_cassette_search_no_results(self, runner, temp_cache_dir):
+        """Test search with no matching results."""
+        self._store_entry(temp_cache_dir, message="Something else")
+
+        result = runner.invoke(main, ["cassette", "search", "nonexistent", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "No cassettes found" in result.output
+
+    def test_cassette_show(self, runner, temp_cache_dir):
+        """Test showing cassette details."""
+        content_hash = self._store_entry(temp_cache_dir, model="gpt-4", message="Show me details")
+
+        result = runner.invoke(main, ["cassette", "show", content_hash, "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert f"Cassette: {content_hash}" in result.output
+        assert "gpt-4" in result.output
+        assert "Prompt" in result.output
+        assert "Replies" in result.output
+
+    def test_cassette_show_json(self, runner, temp_cache_dir):
+        """Test showing cassette details as JSON."""
+        content_hash = self._store_entry(temp_cache_dir, message="JSON detail test")
+
+        result = runner.invoke(main, ["cassette", "show", content_hash, "--cache-dir", temp_cache_dir, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["id"] == content_hash
+        assert "sections" in data
+        assert "sampling" in data
+
+    def test_cassette_show_prefix(self, runner, temp_cache_dir):
+        """Test showing cassette by prefix instead of full hash."""
+        content_hash = self._store_entry(temp_cache_dir, message="Prefix show test")
+        prefix = content_hash[:6]
+
+        result = runner.invoke(main, ["cassette", "show", prefix, "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert f"Cassette: {content_hash}" in result.output
+
+    def test_cassette_show_not_found(self, runner, temp_cache_dir):
+        """Test showing a non-existent cassette."""
+        result = runner.invoke(main, ["cassette", "show", "nonexistent123", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 1
+        assert "no cassette found" in result.output.lower()
+
+    def test_cassette_read(self, runner, temp_cache_dir):
+        """Test reading full completion text."""
+        content_hash = self._store_entry(temp_cache_dir, message="Read my reply")
+
+        result = runner.invoke(main, ["cassette", "read", content_hash, "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "Reply to: Read my reply" in result.output
+
+    def test_cassette_read_json(self, runner, temp_cache_dir):
+        """Test reading completion as JSON."""
+        content_hash = self._store_entry(temp_cache_dir, message="JSON read test")
+
+        result = runner.invoke(main, ["cassette", "read", content_hash, "--cache-dir", temp_cache_dir, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "replies" in data
+        assert len(data["replies"]) >= 1
+
+    def test_cassette_read_with_prompt(self, runner, temp_cache_dir):
+        """Test reading with --prompt includes prompt messages."""
+        content_hash = self._store_entry(temp_cache_dir, message="Include my prompt")
+
+        result = runner.invoke(main, ["cassette", "read", content_hash, "--cache-dir", temp_cache_dir, "--prompt"])
+        assert result.exit_code == 0
+        assert "Prompt" in result.output
+        assert "Include my prompt" in result.output
+
+    def test_cassette_delete(self, runner, temp_cache_dir):
+        """Test deleting a cassette with --yes flag."""
+        content_hash = self._store_entry(temp_cache_dir, message="Delete me")
+
+        result = runner.invoke(main, ["cassette", "delete", content_hash, "--cache-dir", temp_cache_dir, "--yes"])
+        assert result.exit_code == 0
+        assert "Deleted" in result.output
+
+        # Verify it's gone
+        storage = CacheStorage(temp_cache_dir)
+        assert content_hash not in storage.index
+
+    def test_cassette_delete_abort(self, runner, temp_cache_dir):
+        """Test that delete without --yes prompts and can be aborted."""
+        content_hash = self._store_entry(temp_cache_dir, message="Do not delete")
+
+        result = runner.invoke(main, ["cassette", "delete", content_hash, "--cache-dir", temp_cache_dir], input="n\n")
+        assert result.exit_code == 0
+        assert "Aborted" in result.output
+
+        # Verify it's still there
+        storage = CacheStorage(temp_cache_dir)
+        assert content_hash in storage.index
+
+    def test_cassette_delete_not_found(self, runner, temp_cache_dir):
+        """Test deleting a non-existent cassette."""
+        result = runner.invoke(main, ["cassette", "delete", "nonexistent123", "--cache-dir", temp_cache_dir, "--yes"])
+        assert result.exit_code == 1
+
+    def test_cassette_stats_empty(self, runner, temp_cache_dir):
+        """Test stats on empty cache."""
+        result = runner.invoke(main, ["cassette", "stats", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "Total cassettes: 0" in result.output
+
+    def test_cassette_stats_with_entries(self, runner, temp_cache_dir):
+        """Test stats with cached entries."""
+        self._store_entry(temp_cache_dir, model="gpt-4", message="Stats test 1")
+        self._store_entry(temp_cache_dir, model="claude-3", message="Stats test 2")
+
+        result = runner.invoke(main, ["cassette", "stats", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "Total cassettes: 2" in result.output
+        assert "gpt-4" in result.output
+        assert "claude-3" in result.output
+
+    def test_cassette_stats_json(self, runner, temp_cache_dir):
+        """Test stats with --json output."""
+        self._store_entry(temp_cache_dir, message="JSON stats test")
+
+        result = runner.invoke(main, ["cassette", "stats", "--cache-dir", temp_cache_dir, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["total_entries"] == 1
+        assert "disk_size_bytes" in data
+        assert "entries_by_model" in data
+
+    def test_cassette_reindex(self, runner, temp_cache_dir):
+        """Test reindex command."""
+        self._store_entry(temp_cache_dir, message="Reindex test")
+
+        result = runner.invoke(main, ["cassette", "reindex", "--cache-dir", temp_cache_dir])
+        assert result.exit_code == 0
+        assert "Reindexed 1 tape files" in result.output
 
 
 class TestTestGateCommand:

@@ -1,0 +1,3 @@
+content_hash	prompt_model_hash	prompt_hash	model	is_greedy	temperature	tokens_in	tokens_out	replies	max_replies	has_logprobs	has_tool_use	slug	recorded	first_user_message
+6c72599f3142	6c72599f3142	8c81e05fef75a909	openai/gpt-oss-120b	false		82	34	1	1	false	false	what-is-2-2-reply-with-only-the-number	2026-04-12T02:35:08.262221+00:00	What is 2+2? Reply with only the number.
+e5ce50e06a1e	e5ce50e06a1e	767a18b7152d15ef	openai/gpt-oss-120b	false		94	24	1	1	false	false	this-is-a-test-prompt-reply-with-only	2026-04-12T02:35:08.265229+00:00	"This is a test prompt. Reply with **ONLY** ""OK."" to confirm that everything is ok. DO NOT output anything else."

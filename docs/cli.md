@@ -182,14 +182,16 @@ inference-gate test-upstream --upstream https://my-resource.openai.azure.com
 - `0` - Test passed successfully
 - `1` - Test failed (connection error, authentication error, etc.)
 
-## Cache Management Commands
+## Cassette Management Commands
 
-### `cache list` - List Cached Entries
+All cassette commands support `--cache-dir` to override the cache directory and are designed for both human and AI agentic consumption via the `--json` flag. Cassette IDs support prefix matching (like git short hashes).
 
-Display all cached inference entries with their metadata.
+### `cassette list` - List Cached Cassettes
+
+List all cached cassettes with filtering and sorting.
 
 ```bash
-inference-gate cache list [OPTIONS]
+inference-gate cassette list [OPTIONS]
 ```
 
 **Options:**
@@ -197,38 +199,52 @@ inference-gate cache list [OPTIONS]
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+| `--model` | `-m` | Filter by model name (substring match) | |
+| `--greedy/--non-greedy` | | Filter by greedy / non-greedy sampling | |
+| `--has-tools` | | Filter cassettes that use tools | |
+| `--has-logprobs` | | Filter cassettes that have logprobs | |
+| `--after` | | Only cassettes recorded after this ISO 8601 date | |
+| `--before` | | Only cassettes recorded before this ISO 8601 date | |
+| `--sort` | | Sort by: `recorded`, `model`, `tokens_in`, `tokens_out` | recorded |
+| `--limit` | `-n` | Maximum number of results | |
+| `--json` | | Output as JSON array | false |
 
 **Example:**
 
 ```bash
-inference-gate cache list
-inference-gate cache list --cache-dir ./test_cache
+# List all cassettes
+inference-gate cassette list
+
+# Filter by model
+inference-gate cassette list --model gpt-4
+
+# Only greedy cassettes, sorted by token output
+inference-gate cassette list --greedy --sort tokens_out
+
+# JSON output for programmatic use
+inference-gate cassette list --json
+
+# Limit to 10 most recent
+inference-gate cassette list --limit 10
 ```
 
-**Output:**
+**Human Output:**
 
 ```
-Found 3 cached entries:
+ID             Model                        Temp  Repl  Tok In Tok Out Recorded               First Message
+------------------------------------------------------------------------------------------------------------------------
+6c72599f3142   openai/gpt-oss-120b                   1      82      34 2026-04-12T02:35:08    What is 2+2? Reply with only the number.
+e5ce50e06a1e   openai/gpt-oss-120b           0.7     3     150      75 2026-04-11T18:20:00    Explain quantum computing in simple terms
 
-  [abc123def456]
-    Path: POST /v1/chat/completions
-    Model: gpt-4
-    Temperature: 0.7
-    Streaming: false
-
-  [789ghi012jkl]
-    Path: POST /v1/chat/completions
-    Model: gpt-3.5-turbo
-    Temperature: 0
-    Streaming: true
+2 cassette(s)
 ```
 
-### `cache info` - Show Cache Statistics
+### `cassette search` - Search Cassettes
 
-Display statistics about the cache contents.
+Full-text search across first user message and slug fields.
 
 ```bash
-inference-gate cache info [OPTIONS]
+inference-gate cassette search QUERY [OPTIONS]
 ```
 
 **Options:**
@@ -236,30 +252,126 @@ inference-gate cache info [OPTIONS]
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+| `--model` | `-m` | Additional model filter (substring) | |
+| `--limit` | `-n` | Maximum results | 20 |
+| `--json` | | Output as JSON array | false |
 
 **Example:**
 
 ```bash
-inference-gate cache info
+# Search for cassettes about Python
+inference-gate cassette search "python"
+
+# Search with model filter and JSON output
+inference-gate cassette search "explain" --model gpt-4 --json
 ```
 
-**Output:**
+### `cassette show` - Show Cassette Details
 
-```
-Cache directory: .inference_cache
-Total entries: 15
-Streaming responses: 3
-Models:
-  gpt-3.5-turbo: 8
-  gpt-4: 7
-```
-
-### `cache clear` - Clear All Cached Entries
-
-Delete all cached entries from the cache directory.
+Show metadata, prompt messages, and reply summaries for a cassette. Does **not** show full completion text — use `read` for that.
 
 ```bash
-inference-gate cache clear [OPTIONS]
+inference-gate cassette show CASSETTE_ID [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+| `--json` | | Output as JSON object | false |
+
+**Example:**
+
+```bash
+# Show by full hash
+inference-gate cassette show 6c72599f3142
+
+# Show by prefix (like git short hashes)
+inference-gate cassette show 6c72
+
+# JSON output
+inference-gate cassette show 6c72599f3142 --json
+```
+
+**Human Output:**
+
+```
+Cassette: 6c72599f3142
+Model: openai/gpt-oss-120b
+Endpoint: /v1/chat/completions
+Recorded: 2026-04-12T02:35:08+00:00
+Temperature: (not set)
+Greedy: No
+Replies: 1 / 1
+Tools: none
+Logprobs: No
+Content Hash: 6c72599f3142
+Prompt+Model Hash: 6c72599f3142
+Prompt Hash: 8c81e05fef75a909
+
+--- Prompt ---
+[user] What is 2+2? Reply with only the number.
+
+--- Replies ---
+Reply 1: stop | 82 in / 34 out
+```
+
+### `cassette read` - Read Full Completion Text
+
+Read the full completion text of a cassette's reply or replies.
+
+```bash
+inference-gate cassette read CASSETTE_ID [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+| `--reply` | `-r` | Show only a specific reply number | all replies |
+| `--prompt` | `-p` | Also include the prompt messages | false |
+| `--json` | | Output as JSON | false |
+
+**Example:**
+
+```bash
+# Read all replies
+inference-gate cassette read 6c72599f3142
+
+# Read specific reply
+inference-gate cassette read 6c72 --reply 1
+
+# Include prompt in output
+inference-gate cassette read 6c72 --prompt
+
+# JSON output for programmatic use
+inference-gate cassette read 6c72 --json
+```
+
+**JSON Output:**
+
+```json
+{
+  "replies": [
+    {
+      "reply_number": 1,
+      "text": "4",
+      "stop_reason": "stop",
+      "input_tokens": "82",
+      "output_tokens": "34"
+    }
+  ]
+}
+```
+
+### `cassette delete` - Delete a Cassette
+
+Delete a single cassette by ID, removing the tape file, associated response files, and index entry.
+
+```bash
+inference-gate cassette delete CASSETTE_ID [OPTIONS]
 ```
 
 **Options:**
@@ -273,10 +385,84 @@ inference-gate cache clear [OPTIONS]
 
 ```bash
 # Interactive (asks for confirmation)
-inference-gate cache clear
+inference-gate cassette delete 6c72599f3142
 
-# Non-interactive (skips confirmation)
-inference-gate cache clear --yes
+# Non-interactive
+inference-gate cassette delete 6c72 --yes
+```
+
+### `cassette stats` - Show Cache Statistics
+
+Display aggregated statistics about the cassette cache.
+
+```bash
+inference-gate cassette stats [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+| `--json` | | Output as JSON | false |
+
+**Example:**
+
+```bash
+inference-gate cassette stats
+
+# JSON for programmatic consumption
+inference-gate cassette stats --json
+```
+
+**Human Output:**
+
+```
+Cache directory: .inference_cache
+Total cassettes: 42
+Total replies: 85
+Disk size: 5.2 MB
+Greedy: 10 | Non-greedy: 32
+Total tokens: 15,200 in / 8,400 out
+
+Entries by model:
+  gpt-4: 25
+  claude-3: 17
+```
+
+**JSON Output:**
+
+```json
+{
+  "total_entries": 42,
+  "total_replies": 85,
+  "disk_size_bytes": 5242880,
+  "greedy_entries": 10,
+  "non_greedy_entries": 32,
+  "entries_by_model": {"gpt-4": 25, "claude-3": 17},
+  "total_tokens_in": 15200,
+  "total_tokens_out": 8400
+}
+```
+
+### `cassette reindex` - Rebuild Index
+
+Rebuild the TSV index from tape files on disk. Useful after manually editing or copying tape files.
+
+```bash
+inference-gate cassette reindex [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--cache-dir` | `-c` | Directory where cached responses are stored | .inference_cache |
+
+**Example:**
+
+```bash
+inference-gate cassette reindex
 ```
 
 ## Configuration Commands

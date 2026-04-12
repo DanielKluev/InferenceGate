@@ -46,10 +46,18 @@ class Config(BaseModel):
     upstream_timeout: float = Field(default=120.0,
                                     description="Timeout in seconds for upstream API requests before returning 504 Gateway Timeout")
 
-    # Fuzzy model matching
-    fuzzy_model_matching: bool = Field(
-        default=False, description="Enable fuzzy model matching: on cache miss, look for entries with the same prompt "
-        "but a different model")
+    # Fuzzy matching (independent toggles replacing old fuzzy_model_matching)
+    fuzzy_model: bool = Field(default=False, description="Enable fuzzy model matching: on cache miss, reuse entries with the same prompt "
+                              "but a different model")
+    fuzzy_sampling: str = Field(default="off",
+                                description="Sampling parameter fuzzy matching level: "
+                                "'off' (exact only), 'soft' (non-greedy matches non-greedy), "
+                                "'aggressive' (greedy and non-greedy may match)")
+
+    # Multi-reply settings for non-greedy sampling
+    max_non_greedy_replies: int = Field(default=5,
+                                        description="Maximum number of replies to collect per non-greedy cassette "
+                                        "before switching to replay cycling")
 
     # Test command settings
     test_prompt: str = Field(
@@ -117,10 +125,6 @@ class ConfigManager:
             config_dict["api_key"] = env_api_key
 
         config = Config(**config_dict)
-
-        # If the config file didn't exist, save the current values so the user has a file to edit
-        if not self.config_path.exists():
-            self.save(config)
 
         return config
 

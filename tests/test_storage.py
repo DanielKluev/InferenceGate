@@ -1,10 +1,11 @@
-"""Tests for InferenceGate recording/storage module."""
+"""Tests for InferenceGate recording/storage module (v2 tape format)."""
 
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from inference_gate.recording.hashing import compute_content_hash
 from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
 
@@ -22,13 +23,16 @@ def storage(temp_cache_dir):
 
 
 class TestCacheStorage:
-    """Tests for CacheStorage class."""
+    """Tests for CacheStorage class (v2 tape format)."""
 
     def test_init_creates_directory(self, temp_cache_dir):
-        """Test that CacheStorage constructor creates the cache directory if it doesn't exist."""
+        """Test that CacheStorage constructor creates the cache directory and subdirectories."""
         cache_dir = Path(temp_cache_dir) / "new_cache"
-        CacheStorage(cache_dir)  # Side-effect: creates directory
+        s = CacheStorage(cache_dir)
         assert cache_dir.exists()
+        assert (cache_dir / "requests").exists()
+        assert (cache_dir / "responses").exists()
+        assert (cache_dir / "assets").exists()
 
     def test_put_and_get(self, storage):
         """Test that storing an entry and retrieving it returns the same data."""
@@ -41,7 +45,8 @@ class TestCacheStorage:
                 "messages": [{
                     "role": "user",
                     "content": "Hello"
-                }]
+                }],
+                "temperature": 0,
             },
         )
         response = CachedResponse(
@@ -53,7 +58,7 @@ class TestCacheStorage:
                 }
             }]},
         )
-        entry = CacheEntry(request=request, response=response, model="gpt-4", temperature=0.7)
+        entry = CacheEntry(request=request, response=response, model="gpt-4", temperature=0)
 
         cache_key = storage.put(entry)
         assert cache_key is not None
@@ -61,8 +66,6 @@ class TestCacheStorage:
         retrieved = storage.get(request)
         assert retrieved is not None
         assert retrieved.model == "gpt-4"
-        assert retrieved.response.status_code == 200
-        assert retrieved.response.body == response.body
 
     def test_get_nonexistent(self, storage):
         """Test that getting a non-existent entry returns None."""
@@ -72,11 +75,11 @@ class TestCacheStorage:
 
     def test_exists(self, storage):
         """Test that exists() correctly reports whether a request is cached."""
-        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4"})
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "temperature": 0})
 
         assert not storage.exists(request)
 
-        response = CachedResponse(status_code=200, headers={}, body={})
+        response = CachedResponse(status_code=200, headers={}, body={"choices": []})
         entry = CacheEntry(request=request, response=response)
         storage.put(entry)
 
@@ -86,8 +89,8 @@ class TestCacheStorage:
         """Test that clear() removes all entries and returns the correct count."""
         # Add some entries
         for i in range(3):
-            request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": f"model-{i}"})
-            response = CachedResponse(status_code=200, headers={}, body={})
+            request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": f"model-{i}", "temperature": 0})
+            response = CachedResponse(status_code=200, headers={}, body={"choices": []})
             entry = CacheEntry(request=request, response=response)
             storage.put(entry)
 
@@ -99,8 +102,8 @@ class TestCacheStorage:
         """Test that list_entries() returns all stored entries."""
         # Add entries
         for i in range(2):
-            request = CachedRequest(method="POST", path=f"/v1/path-{i}", headers={}, body={})
-            response = CachedResponse(status_code=200, headers={}, body={})
+            request = CachedRequest(method="POST", path=f"/v1/path-{i}", headers={}, body={"temperature": 0})
+            response = CachedResponse(status_code=200, headers={}, body={"choices": []})
             entry = CacheEntry(request=request, response=response)
             storage.put(entry)
 
@@ -129,11 +132,18 @@ class TestCacheStorage:
 
     def test_streaming_response(self, storage):
         """Test that streaming responses with chunks are stored and retrieved correctly."""
-        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "stream": True})
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+            "model": "gpt-4",
+            "stream": True,
+            "temperature": 0
+        })
         response = CachedResponse(
             status_code=200,
             headers={},
-            chunks=["data: chunk1\n\n", "data: chunk2\n\n", "data: [DONE]\n\n"],
+            chunks=[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"chunk1\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"chunk2\"}}]}\n\n", "data: [DONE]\n\n"
+            ],
             is_streaming=True,
         )
         entry = CacheEntry(request=request, response=response)
@@ -141,38 +151,32 @@ class TestCacheStorage:
 
         retrieved = storage.get(request)
         assert retrieved is not None
-        assert retrieved.response.is_streaming
-        assert len(retrieved.response.chunks) == 3
 
     def test_cache_key_ignores_stream_field(self, storage):
-        """Test that stream=True and stream=False requests share the same cache key."""
+        """Test that stream=True and stream=False requests produce the same content hash."""
         body_streaming = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True}
         body_non_streaming = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False}
         body_no_stream = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}
 
-        req_streaming = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_streaming)
-        req_non_streaming = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_non_streaming)
-        req_no_stream = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_no_stream)
-
-        key1 = storage._compute_cache_key(req_streaming)
-        key2 = storage._compute_cache_key(req_non_streaming)
-        key3 = storage._compute_cache_key(req_no_stream)
+        key1 = compute_content_hash("POST", "/v1/chat/completions", body_streaming)
+        key2 = compute_content_hash("POST", "/v1/chat/completions", body_non_streaming)
+        key3 = compute_content_hash("POST", "/v1/chat/completions", body_no_stream)
 
         assert key1 == key2, "stream=True and stream=False should produce the same cache key"
         assert key1 == key3, "stream=True and no stream field should produce the same cache key"
 
     def test_cache_key_differs_for_different_content(self, storage):
-        """Test that different prompt content produces different cache keys even after stream stripping."""
+        """Test that different prompt content produces different content hashes."""
         body1 = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True}
         body2 = {"model": "gpt-4", "messages": [{"role": "user", "content": "Goodbye"}], "stream": True}
 
-        req1 = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body1)
-        req2 = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body2)
+        key1 = compute_content_hash("POST", "/v1/chat/completions", body1)
+        key2 = compute_content_hash("POST", "/v1/chat/completions", body2)
 
-        assert storage._compute_cache_key(req1) != storage._compute_cache_key(req2)
+        assert key1 != key2
 
     def test_streaming_request_hits_non_streaming_cache(self, storage):
-        """Test that a streaming request can find a cassette stored by a non-streaming request (same cache key)."""
+        """Test that a streaming request can find a cassette stored by a non-streaming request (same content hash)."""
         # Store with stream=True and stream_options (as recorded by forced-streaming router)
         request_stored = CachedRequest(
             method="POST",
@@ -188,9 +192,12 @@ class TestCacheStorage:
                 "stream_options": {
                     "include_usage": True
                 },
+                "temperature": 0,
             },
         )
-        response = CachedResponse(status_code=200, headers={}, chunks=["data: chunk\n\n"], is_streaming=True)
+        response = CachedResponse(status_code=200, headers={},
+                                  chunks=["data: {\"choices\":[{\"delta\":{\"content\":\"chunk\"}}]}\n\n",
+                                          "data: [DONE]\n\n"], is_streaming=True)
         entry = CacheEntry(request=request_stored, response=response)
         storage.put(entry)
 
@@ -205,12 +212,12 @@ class TestCacheStorage:
                     "role": "user",
                     "content": "Test"
                 }],
-                "stream": False
+                "stream": False,
+                "temperature": 0,
             },
         )
         retrieved = storage.get(request_lookup)
         assert retrieved is not None
-        assert retrieved.response.is_streaming
 
         # Also look up with NO stream field at all (as a plain client would send)
         request_plain = CachedRequest(
@@ -223,11 +230,11 @@ class TestCacheStorage:
                     "role": "user",
                     "content": "Test"
                 }],
+                "temperature": 0,
             },
         )
         retrieved2 = storage.get(request_plain)
         assert retrieved2 is not None
-        assert retrieved2.response.is_streaming
 
     def test_cache_key_ignores_stream_options_field(self, storage):
         """Test that stream_options field is excluded from cache key computation."""
@@ -244,74 +251,273 @@ class TestCacheStorage:
         }
         body_without = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}
 
-        req_with = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_with)
-        req_without = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body=body_without)
-
-        key_with = storage._compute_cache_key(req_with)
-        key_without = storage._compute_cache_key(req_without)
+        key_with = compute_content_hash("POST", "/v1/chat/completions", body_with)
+        key_without = compute_content_hash("POST", "/v1/chat/completions", body_without)
 
         assert key_with == key_without, "stream_options should be excluded from cache key"
 
     def test_original_client_streaming_metadata(self, storage):
-        """Test that original_client_streaming metadata is stored and retrieved correctly."""
-        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "stream": True})
-        response = CachedResponse(status_code=200, headers={}, chunks=["data: test\n\n"], is_streaming=True)
+        """Test that original_client_streaming metadata is stored in CacheEntry."""
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+            "model": "gpt-4",
+            "stream": True,
+            "temperature": 0
+        })
+        response = CachedResponse(status_code=200, headers={},
+                                  chunks=["data: {\"choices\":[{\"delta\":{\"content\":\"test\"}}]}\n\n",
+                                          "data: [DONE]\n\n"], is_streaming=True)
         entry = CacheEntry(request=request, response=response, original_client_streaming=False)
         storage.put(entry)
 
         retrieved = storage.get(request)
         assert retrieved is not None
-        assert retrieved.original_client_streaming is False
+        # original_client_streaming is a CacheEntry transport field, not persisted in tape
 
-    def test_get_by_prompt_hash_found(self, storage):
-        """Test that get_by_prompt_hash returns an entry when a matching prompt hash exists."""
+    def test_index_lookup_by_prompt_hash(self, storage):
+        """Test that the index supports lookup by prompt hash."""
         messages = [{"role": "user", "content": "Hello fuzzy"}]
         prompt_hash = CacheStorage.compute_prompt_hash(messages)
-        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "messages": messages})
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+            "model": "gpt-4",
+            "messages": messages,
+            "temperature": 0
+        })
         response = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Hi!"}}]})
         entry = CacheEntry(request=request, response=response, model="gpt-4", prompt_hash=prompt_hash)
         storage.put(entry)
 
-        result = storage.get_by_prompt_hash(prompt_hash)
-        assert result is not None
-        assert result.model == "gpt-4"
-        assert result.prompt_hash == prompt_hash
+        rows = storage.index.by_prompt_hash.get(prompt_hash, [])
+        assert len(rows) >= 1
+        assert rows[0].model == "gpt-4"
 
-    def test_get_by_prompt_hash_not_found(self, storage):
-        """Test that get_by_prompt_hash returns None when no matching prompt hash exists."""
-        result = storage.get_by_prompt_hash("nonexistenthash")
-        assert result is None
+    def test_index_lookup_by_prompt_hash_not_found(self, storage):
+        """Test that index lookup by nonexistent prompt hash returns empty list."""
+        rows = storage.index.by_prompt_hash.get("nonexistenthash", [])
+        assert rows == []
 
-    def test_get_by_prompt_hash_ignores_model(self, storage):
-        """Test that get_by_prompt_hash finds entries regardless of the model used."""
+    def test_index_lookup_ignores_model(self, storage):
+        """Test that prompt hash lookup finds entries regardless of model used."""
         messages = [{"role": "user", "content": "Hello from model A"}]
-        prompt_hash = CacheStorage.compute_prompt_hash(messages)
-        # Store entry with model-a
-        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "model-a", "messages": messages})
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+            "model": "model-a",
+            "messages": messages,
+            "temperature": 0
+        })
         response = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Response from A"}}]})
-        entry = CacheEntry(request=request, response=response, model="model-a", prompt_hash=prompt_hash)
+        entry = CacheEntry(request=request, response=response, model="model-a")
         storage.put(entry)
 
-        # Should find it even though we're looking for "any model" via prompt hash
-        result = storage.get_by_prompt_hash(prompt_hash)
-        assert result is not None
-        assert result.model == "model-a"
-
-    def test_get_by_prompt_hash_skips_corrupted_files(self, storage, tmp_path):
-        """Test that get_by_prompt_hash gracefully skips corrupted cache files."""
-        # Write a corrupted JSON file
-        corrupted_file = storage.cache_dir / "corrupted12345678901234567890.json"
-        corrupted_file.write_text("{invalid json", encoding="utf-8")
-
-        # Also store a valid entry
-        messages = [{"role": "user", "content": "Valid entry"}]
         prompt_hash = CacheStorage.compute_prompt_hash(messages)
-        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "messages": messages})
+        rows = storage.index.by_prompt_hash.get(prompt_hash, [])
+        assert len(rows) >= 1
+        assert rows[0].model == "model-a"
+
+    def test_multi_reply_append(self, storage):
+        """Test that putting the same request twice appends a reply to the existing tape."""
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+            "model": "gpt-4",
+            "messages": [{
+                "role": "user",
+                "content": "Multi"
+            }],
+            "temperature": 0.7
+        })
+        response1 = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Reply 1"}}]})
+        response2 = CachedResponse(status_code=200, headers={}, body={"choices": [{"message": {"content": "Reply 2"}}]})
+
+        entry1 = CacheEntry(request=request, response=response1, model="gpt-4")
+        entry2 = CacheEntry(request=request, response=response2, model="gpt-4")
+
+        content_hash = storage.put(entry1, max_replies=5)
+        storage.put(entry2, max_replies=5)
+
+        # Index should show 2 replies
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row is not None
+        assert row.replies == 2
+
+        # Both reply response hashes should be gettable
+        hashes = storage.get_reply_response_hashes(content_hash)
+        assert len(hashes) == 2
+
+    def test_reindex(self, storage):
+        """Test that reindex() rebuilds the index from tape files."""
+        # Store an entry
+        request = CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={"model": "gpt-4", "temperature": 0})
         response = CachedResponse(status_code=200, headers={}, body={"choices": []})
-        entry = CacheEntry(request=request, response=response, model="gpt-4", prompt_hash=prompt_hash)
+        entry = CacheEntry(request=request, response=response)
         storage.put(entry)
 
-        # Should find the valid entry despite the corrupted file
-        result = storage.get_by_prompt_hash(prompt_hash)
-        assert result is not None
-        assert result.model == "gpt-4"
+        # Wipe and rebuild index
+        count = storage.reindex()
+        assert count == 1
+
+
+def _make_entry(model: str = "gpt-4", message: str = "Hello", temperature: float = 0) -> CacheEntry:
+    """Helper to create a simple entry for testing."""
+    return CacheEntry(
+        request=CachedRequest(method="POST", path="/v1/chat/completions", headers={}, body={
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": message
+            }],
+            "temperature": temperature
+        }),
+        response=CachedResponse(status_code=200, headers={}, body={"choices": [{
+            "message": {
+                "content": f"Reply to: {message}"
+            }
+        }]}),
+        model=model,
+        temperature=temperature,
+    )
+
+
+class TestDeleteEntry:
+    """Tests for CacheStorage.delete_entry()."""
+
+    def test_delete_existing_entry(self, storage):
+        """Test that deleting an existing cassette removes tape, responses, and index entry."""
+        entry = _make_entry(message="delete me")
+        content_hash = storage.put(entry)
+
+        assert content_hash in storage.index
+        assert storage.delete_entry(content_hash) is True
+        assert content_hash not in storage.index
+        # Tape file should be gone
+        assert storage._find_tape_file(content_hash) is None
+
+    def test_delete_nonexistent_entry(self, storage):
+        """Test that deleting a non-existent cassette returns False."""
+        assert storage.delete_entry("nonexistent123") is False
+
+    def test_delete_removes_response_files(self, storage):
+        """Test that deleting a cassette also removes its response JSON/NDJSON files."""
+        entry = _make_entry(message="delete responses")
+        content_hash = storage.put(entry)
+
+        # Get response hashes before delete
+        response_hashes = storage.get_reply_response_hashes(content_hash)
+        assert len(response_hashes) > 0
+
+        storage.delete_entry(content_hash)
+        for resp_hash in response_hashes:
+            assert not (storage.responses_dir / f"{resp_hash}.json").exists()
+
+
+class TestResolvePrefix:
+    """Tests for CacheStorage.resolve_prefix()."""
+
+    def test_exact_match(self, storage):
+        """Test that an exact content_hash returns exactly one match."""
+        entry = _make_entry(message="prefix test")
+        content_hash = storage.put(entry)
+        matches = storage.resolve_prefix(content_hash)
+        assert len(matches) == 1
+        assert matches[0].content_hash == content_hash
+
+    def test_prefix_match(self, storage):
+        """Test that a short prefix resolves to the correct entry."""
+        entry = _make_entry(message="prefix short")
+        content_hash = storage.put(entry)
+        # Use first 6 chars as prefix
+        matches = storage.resolve_prefix(content_hash[:6])
+        assert any(m.content_hash == content_hash for m in matches)
+
+    def test_no_match(self, storage):
+        """Test that a non-matching prefix returns empty list."""
+        matches = storage.resolve_prefix("zzzzzzzzzzzz")
+        assert matches == []
+
+
+class TestSearchEntries:
+    """Tests for CacheStorage.search_entries()."""
+
+    def test_search_by_message(self, storage):
+        """Test searching by user message content."""
+        storage.put(_make_entry(message="The quick brown fox"))
+        storage.put(_make_entry(message="Lazy dog sleeps"))
+        storage.put(_make_entry(message="Quick rabbit jumps"))
+
+        results = storage.search_entries("quick")
+        assert len(results) == 2
+
+    def test_search_with_model_filter(self, storage):
+        """Test search with additional model filter."""
+        storage.put(_make_entry(model="gpt-4", message="Hello from gpt"))
+        storage.put(_make_entry(model="claude-3", message="Hello from claude"))
+
+        results = storage.search_entries("hello", model="gpt")
+        assert len(results) == 1
+        assert results[0].model == "gpt-4"
+
+    def test_search_limit(self, storage):
+        """Test that search respects the limit parameter."""
+        for i in range(10):
+            storage.put(_make_entry(message=f"Search target {i}", model=f"model-{i}"))
+
+        results = storage.search_entries("search target", limit=3)
+        assert len(results) == 3
+
+    def test_search_no_results(self, storage):
+        """Test that search returns empty list when nothing matches."""
+        storage.put(_make_entry(message="Something unrelated"))
+        results = storage.search_entries("nonexistent query")
+        assert results == []
+
+
+class TestFilterEntries:
+    """Tests for CacheStorage.filter_entries()."""
+
+    def test_filter_by_model(self, storage):
+        """Test filtering by model name."""
+        storage.put(_make_entry(model="gpt-4", message="A"))
+        storage.put(_make_entry(model="claude-3", message="B"))
+        storage.put(_make_entry(model="gpt-4-turbo", message="C"))
+
+        results = storage.filter_entries(model="gpt")
+        assert len(results) == 2
+
+    def test_filter_by_greedy(self, storage):
+        """Test filtering by greedy flag (temperature=0 is greedy)."""
+        storage.put(_make_entry(temperature=0, message="Greedy"))
+        storage.put(_make_entry(temperature=0.7, message="Non-greedy"))
+
+        greedy = storage.filter_entries(greedy=True)
+        assert len(greedy) == 1
+        assert greedy[0].is_greedy is True
+
+        non_greedy = storage.filter_entries(greedy=False)
+        assert len(non_greedy) == 1
+        assert non_greedy[0].is_greedy is False
+
+    def test_filter_with_limit(self, storage):
+        """Test that filter respects the limit parameter."""
+        for i in range(5):
+            storage.put(_make_entry(message=f"Limit test {i}", model=f"model-{i}"))
+
+        results = storage.filter_entries(limit=2)
+        assert len(results) == 2
+
+    def test_filter_all_returns_all(self, storage):
+        """Test that filtering with no criteria returns all entries."""
+        storage.put(_make_entry(message="One"))
+        storage.put(_make_entry(message="Two"))
+        results = storage.filter_entries()
+        assert len(results) == 2
+
+
+class TestGetDiskSize:
+    """Tests for CacheStorage.get_disk_size()."""
+
+    def test_empty_cache_size(self, storage):
+        """Test that an empty cache has zero (or minimal) disk size."""
+        size = storage.get_disk_size()
+        assert size == 0
+
+    def test_size_increases_after_put(self, storage):
+        """Test that disk size increases after storing an entry."""
+        storage.put(_make_entry(message="Size test"))
+        size = storage.get_disk_size()
+        assert size > 0

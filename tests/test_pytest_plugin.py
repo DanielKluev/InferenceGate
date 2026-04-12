@@ -304,7 +304,7 @@ class TestFuzzyModelMatchingViaPytestPlugin:
         pytester.makeini(f"""
             [pytest]
             inferencegate_cache_dir = {CASSETTES_DIR}
-            inferencegate_fuzzy_model_matching = true
+            inferencegate_fuzzy_model = true
         """)
         result = pytester.runpytest("-v", "-s")
         result.assert_outcomes(passed=1)
@@ -340,12 +340,12 @@ class TestFuzzyModelMatchingViaPytestPlugin:
             [pytest]
             inferencegate_cache_dir = {CASSETTES_DIR}
         """)
-        result = pytester.runpytest("-v", "-s", "--inferencegate-fuzzy-model-matching")
+        result = pytester.runpytest("-v", "-s", "--inferencegate-fuzzy-model")
         result.assert_outcomes(passed=1)
 
     def test_fuzzy_matching_via_env_var(self, pytester, monkeypatch):
         """Fuzzy model matching enabled via environment variable finds a cassette recorded with a different model."""
-        monkeypatch.setenv("INFERENCEGATE_FUZZY_MODEL_MATCHING", "true")
+        monkeypatch.setenv("INFERENCEGATE_FUZZY_MODEL", "true")
         pytester.makepyfile(
             textwrap.dedent(f"""
             import http.client
@@ -377,7 +377,7 @@ class TestFuzzyModelMatchingViaPytestPlugin:
         result.assert_outcomes(passed=1)
 
     def test_no_fuzzy_matching_cli_overrides_ini(self, pytester):
-        """--no-inferencegate-fuzzy-model-matching CLI flag overrides ini=true, returning 503 on model mismatch."""
+        """--no-inferencegate-fuzzy-model CLI flag overrides ini=true, returning 503 on model mismatch."""
         pytester.makepyfile(
             textwrap.dedent(f"""
             import http.client
@@ -404,9 +404,9 @@ class TestFuzzyModelMatchingViaPytestPlugin:
         pytester.makeini(f"""
             [pytest]
             inferencegate_cache_dir = {CASSETTES_DIR}
-            inferencegate_fuzzy_model_matching = true
+            inferencegate_fuzzy_model = true
         """)
-        result = pytester.runpytest("-v", "-s", "--no-inferencegate-fuzzy-model-matching")
+        result = pytester.runpytest("-v", "-s", "--no-inferencegate-fuzzy-model")
         result.assert_outcomes(passed=1)
 
 
@@ -472,16 +472,23 @@ class TestPluginDisabling:
 
 
 class TestHeaderSanitization:
-    """Tests that CacheStorage.put() strips sensitive headers from stored cassettes."""
+    """Tests that CacheStorage.put() does not leak sensitive headers into tape files.
 
-    def test_authorization_header_stripped(self, storage):
-        """Authorization header should be removed from stored cassettes."""
+    In v2 tape format, request headers are not stored at all — the tape only
+    contains semantic request content (messages, model, sampling params) and
+    response references. These tests verify that sensitive header values do not
+    appear anywhere in the stored tape files.
+    """
+
+    def test_authorization_header_not_in_tape(self, storage):
+        """Authorization header value should not appear in stored tape files."""
         from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry
+        secret = "Bearer sk-secret-key-12345"
         entry = CacheEntry(
             request=CachedRequest(
                 method="POST", path="/v1/chat/completions", headers={
                     "Content-Type": "application/json",
-                    "Authorization": "Bearer sk-secret-key-12345",
+                    "Authorization": secret,
                     "Accept": "*/*",
                 }, body={
                     "model": "test",
@@ -494,26 +501,22 @@ class TestHeaderSanitization:
         )
         cache_key = storage.put(entry)
 
-        # Read back the cassette file directly
-        import json
-        cache_file = storage._get_cache_file(cache_key)
-        with open(cache_file, encoding="utf-8") as f:
-            data = json.load(f)
+        # Read back the tape file and verify secret is not present
+        tape_path = storage._find_tape_file(cache_key)
+        assert tape_path is not None
+        tape_content = tape_path.read_text(encoding="utf-8")
+        assert secret not in tape_content
+        assert "sk-secret-key-12345" not in tape_content
 
-        stored_headers = data["request"]["headers"]
-        assert "Authorization" not in stored_headers
-        assert "Content-Type" in stored_headers
-        assert "Accept" in stored_headers
-
-    def test_multiple_sensitive_headers_stripped(self, storage):
-        """X-Api-Key and Proxy-Authorization should also be stripped."""
+    def test_multiple_sensitive_headers_not_in_tape(self, storage):
+        """X-Api-Key and Proxy-Authorization values should not appear in stored tape files."""
         from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry
         entry = CacheEntry(
             request=CachedRequest(
                 method="POST", path="/v1/chat/completions", headers={
                     "Content-Type": "application/json",
-                    "X-Api-Key": "secret",
-                    "Proxy-Authorization": "Basic secret",
+                    "X-Api-Key": "secret-api-key",
+                    "Proxy-Authorization": "Basic proxy-secret",
                 }, body={
                     "model": "test",
                     "messages": [{
@@ -525,23 +528,19 @@ class TestHeaderSanitization:
         )
         cache_key = storage.put(entry)
 
-        import json
-        cache_file = storage._get_cache_file(cache_key)
-        with open(cache_file, encoding="utf-8") as f:
-            data = json.load(f)
+        tape_path = storage._find_tape_file(cache_key)
+        assert tape_path is not None
+        tape_content = tape_path.read_text(encoding="utf-8")
+        assert "secret-api-key" not in tape_content
+        assert "proxy-secret" not in tape_content
 
-        stored_headers = data["request"]["headers"]
-        assert "X-Api-Key" not in stored_headers
-        assert "Proxy-Authorization" not in stored_headers
-        assert "Content-Type" in stored_headers
-
-    def test_case_insensitive_header_stripping(self, storage):
-        """Header stripping should be case-insensitive."""
+    def test_case_insensitive_header_not_leaked(self, storage):
+        """Header values should not be leaked regardless of header name casing."""
         from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry
         entry = CacheEntry(
             request=CachedRequest(method="POST", path="/v1/chat/completions", headers={
                 "content-type": "application/json",
-                "AUTHORIZATION": "Bearer secret",
+                "AUTHORIZATION": "Bearer secret-case-test",
             }, body={
                 "model": "test",
                 "messages": [{
@@ -553,11 +552,7 @@ class TestHeaderSanitization:
         )
         cache_key = storage.put(entry)
 
-        import json
-        cache_file = storage._get_cache_file(cache_key)
-        with open(cache_file, encoding="utf-8") as f:
-            data = json.load(f)
-
-        stored_headers = data["request"]["headers"]
-        assert "AUTHORIZATION" not in stored_headers
-        assert "content-type" in stored_headers
+        tape_path = storage._find_tape_file(cache_key)
+        assert tape_path is not None
+        tape_content = tape_path.read_text(encoding="utf-8")
+        assert "secret-case-test" not in tape_content

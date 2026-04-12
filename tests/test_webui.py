@@ -114,14 +114,13 @@ class TestWebUIAPI:
         assert isinstance(data, list)
         assert len(data) == 2
 
-        # Check structure of returned entries
+        # Check structure of returned entries (v2 index-based format)
         entry = data[0]
         assert "id" in entry
         assert "model" in entry
-        assert "path" in entry
-        assert "method" in entry
-        assert "status_code" in entry
-        assert "is_streaming" in entry
+        assert "is_greedy" in entry
+        assert "replies" in entry
+        assert "slug" in entry
 
     async def test_get_cache_entry_found(self, webui_client, storage_with_entries):
         """Test GET /api/cache/{id} returns entry details."""
@@ -134,11 +133,10 @@ class TestWebUIAPI:
         data = await resp.json()
 
         assert data["id"] == entry_id
-        assert "request" in data
-        assert "response" in data
-        assert data["request"]["method"] == "POST"
-        assert data["request"]["path"] == "/v1/chat/completions"
-        assert data["response"]["status_code"] == 200
+        assert "endpoint" in data
+        assert "sampling" in data
+        assert "sections" in data
+        assert data["endpoint"] == "/v1/chat/completions"
 
     async def test_get_cache_entry_not_found(self, webui_client):
         """Test GET /api/cache/{id} returns 404 for non-existent entry."""
@@ -155,11 +153,12 @@ class TestWebUIAPI:
 
         assert "total_entries" in data
         assert "total_size_bytes" in data
-        assert "streaming_responses" in data
+        assert "greedy_responses" in data
+        assert "non_greedy_responses" in data
         assert "entries_by_model" in data
 
         assert data["total_entries"] == 2
-        assert data["streaming_responses"] == 1
+        assert data["non_greedy_responses"] == 2
         assert "gpt-4" in data["entries_by_model"]
         assert "gpt-3.5-turbo" in data["entries_by_model"]
 
@@ -249,5 +248,6 @@ class TestWebUIEmptyCache:
 
         assert data["total_entries"] == 0
         assert data["total_size_bytes"] >= 0
-        assert data["streaming_responses"] == 0
+        assert data["greedy_responses"] == 0
+        assert data["non_greedy_responses"] == 0
         assert data["entries_by_model"] == {}

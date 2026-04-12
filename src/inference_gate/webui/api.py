@@ -2,8 +2,8 @@
 API endpoint handlers for the WebUI Dashboard.
 
 Provides JSON API endpoints for:
-- Listing cached entries
-- Getting entry details
+- Listing cached entries (from TSV index)
+- Getting entry details (from tape files)
 - Cache statistics
 - Current configuration
 """
@@ -22,6 +22,7 @@ class WebUIAPI:
     API handler class for WebUI endpoints.
 
     Provides methods to fetch cache data, statistics, and configuration.
+    Uses the TapeIndex for fast listing and tape files for entry details.
     """
 
     def __init__(self, storage: CacheStorage, mode: Mode, cache_dir: str, upstream_base_url: str | None, host: str, port: int) -> None:
@@ -46,21 +47,26 @@ class WebUIAPI:
         """
         Handle GET /api/cache - list all cached entries.
 
-        Returns a JSON list of all cached entries with summary information.
+        Returns a JSON list of all cached entries from the TSV index with summary information.
         """
         try:
-            entries = self.storage.list_entries()
+            rows = list(self.storage.index.by_content_hash.values())
             result = []
-            for cache_key, entry in entries:
+            for row in rows:
                 result.append({
-                    "id": cache_key,
-                    "model": entry.model,
-                    "path": entry.request.path,
-                    "method": entry.request.method,
-                    "status_code": entry.response.status_code,
-                    "is_streaming": entry.response.is_streaming,
-                    "temperature": entry.temperature,
-                    "prompt_hash": entry.prompt_hash,
+                    "id": row.content_hash,
+                    "model": row.model,
+                    "is_greedy": row.is_greedy,
+                    "temperature": row.temperature,
+                    "replies": row.replies,
+                    "max_replies": row.max_replies,
+                    "has_logprobs": row.has_logprobs,
+                    "has_tool_use": row.has_tool_use,
+                    "slug": row.slug,
+                    "recorded": row.recorded,
+                    "first_user_message": row.first_user_message,
+                    "tokens_in": row.tokens_in,
+                    "tokens_out": row.tokens_out,
                 })
             self.log.debug("Returning %d cache entries", len(result))
             return web.json_response(result)
@@ -72,45 +78,45 @@ class WebUIAPI:
         """
         Handle GET /api/cache/{entry_id} - get detailed entry information.
 
-        Returns full request and response details for a cached entry.
+        Loads the tape file for the given content_hash and returns full details.
         """
         entry_id = request.match_info.get("entry_id")
         if not entry_id:
             return web.json_response({"error": "Missing entry_id"}, status=400)
 
         try:
-            # Load the cache entry directly by key instead of scanning all files
-            cache_file = self.storage._get_cache_file(entry_id)
-            if not cache_file.exists():
+            # Look up in index first
+            index_row = self.storage.index.by_content_hash.get(entry_id)
+            if index_row is None:
                 return web.json_response({"error": "Entry not found"}, status=404)
 
-            # Read and parse the cache entry
-            with open(cache_file, encoding="utf-8") as f:
-                import json
-                data = json.load(f)
+            # Load the tape file for full details
+            tape_data = self.storage.load_tape(entry_id)
+            if tape_data is None:
+                return web.json_response({"error": "Tape file not found"}, status=404)
 
-            from inference_gate.recording.storage import CacheEntry
-            entry = CacheEntry.model_validate(data)
-
+            metadata, sections = tape_data
             result = {
                 "id": entry_id,
-                "model": entry.model,
-                "temperature": entry.temperature,
-                "prompt_hash": entry.prompt_hash,
-                "request": {
-                    "method": entry.request.method,
-                    "path": entry.request.path,
-                    "headers": entry.request.headers,
-                    "body": entry.request.body,
-                    "query_params": entry.request.query_params,
+                "model": metadata.model,
+                "endpoint": metadata.endpoint,
+                "sampling": metadata.sampling.model_dump(),
+                "content_hash": metadata.content_hash,
+                "prompt_model_hash": metadata.prompt_model_hash,
+                "prompt_hash": metadata.prompt_hash,
+                "recorded": metadata.recorded.isoformat() if metadata.recorded else None,
+                "replies": metadata.replies,
+                "max_replies": metadata.max_replies,
+                "sections": [{"kind": s.kind.value, "header": s.header, "body": s.body} for s in sections],
+                "index": {
+                    "is_greedy": index_row.is_greedy,
+                    "temperature": index_row.temperature,
+                    "tokens_in": index_row.tokens_in,
+                    "tokens_out": index_row.tokens_out,
+                    "has_logprobs": index_row.has_logprobs,
+                    "has_tool_use": index_row.has_tool_use,
+                    "first_user_message": index_row.first_user_message,
                 },
-                "response": {
-                    "status_code": entry.response.status_code,
-                    "headers": entry.response.headers,
-                    "body": entry.response.body,
-                    "chunks": entry.response.chunks,
-                    "is_streaming": entry.response.is_streaming,
-                }
             }
             self.log.debug("Returning cache entry: %s", entry_id)
             return web.json_response(result)
@@ -125,32 +131,39 @@ class WebUIAPI:
         Returns statistics about the cache: total entries, size, entries by model, etc.
         """
         try:
-            entries = self.storage.list_entries()
-            total_entries = len(entries)
+            rows = list(self.storage.index.by_content_hash.values())
+            total_entries = len(rows)
 
             # Calculate statistics
             models: dict[str, int] = {}
-            streaming_count = 0
-            total_size = 0
+            greedy_count = 0
+            total_replies = 0
 
-            for cache_key, entry in entries:
+            for row in rows:
                 # Count by model
-                if entry.model:
-                    models[entry.model] = models.get(entry.model, 0) + 1
+                if row.model:
+                    models[row.model] = models.get(row.model, 0) + 1
 
-                # Count streaming responses
-                if entry.response.is_streaming:
-                    streaming_count += 1
+                # Count greedy responses
+                if row.is_greedy:
+                    greedy_count += 1
+
+                total_replies += row.replies
 
             # Calculate total cache directory size
             cache_path = Path(self.cache_dir)
+            total_size = 0
             if cache_path.exists():
-                total_size = sum(f.stat().st_size for f in cache_path.glob("*.json"))
+                for f in cache_path.rglob("*"):
+                    if f.is_file():
+                        total_size += f.stat().st_size
 
             result = {
                 "total_entries": total_entries,
+                "total_replies": total_replies,
                 "total_size_bytes": total_size,
-                "streaming_responses": streaming_count,
+                "greedy_responses": greedy_count,
+                "non_greedy_responses": total_entries - greedy_count,
                 "entries_by_model": models,
             }
 

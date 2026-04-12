@@ -1,16 +1,48 @@
-"""Storage layer for caching API calls."""
+"""
+Storage layer for caching API calls (v2 tape format).
 
-import hashlib
+Uses a directory structure with human-readable `.tape` cassette files
+(YAML frontmatter + MIME body), content-addressed response files, and
+a TSV index for fast multi-tier lookup.
+
+Directory layout:
+```
+{cache_dir}/
+  index.tsv
+  requests/{content_hash}__{slug}.tape
+  responses/{hash}.json
+  responses/{hash}.chunks.ndjson
+  assets/{hash}.{ext}
+```
+
+Key classes: `CacheStorage`, `CachedRequest`, `CachedResponse`, `CacheEntry`
+"""
+
 import json
 import logging
+import shutil
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
+
+from inference_gate.recording.hashing import (compute_content_hash, compute_prompt_hash, compute_prompt_model_hash, compute_response_hash,
+                                              extract_first_user_message, generate_slug)
+from inference_gate.recording.models import IndexRow, ReplyInfo, SamplingParams, TapeMetadata, extract_sampling_params
+from inference_gate.recording.tape_index import TapeIndex
+from inference_gate.recording.tape_parser import parse_tape
+from inference_gate.recording.tape_writer import (append_reply_to_tape, build_message_sections, build_reply_section, generate_boundary,
+                                                  write_tape, write_tape_to_file)
 
 
 class CachedRequest(BaseModel):
-    """Cached request data."""
+    """
+    Cached request data.
+
+    Transport model used by the router and inflow/outflow layers.
+    """
 
     method: str
     path: str
@@ -20,7 +52,11 @@ class CachedRequest(BaseModel):
 
 
 class CachedResponse(BaseModel):
-    """Cached response data."""
+    """
+    Cached response data.
+
+    Transport model carrying either a JSON body or streaming chunks.
+    """
 
     status_code: int
     headers: dict[str, str]
@@ -30,7 +66,12 @@ class CachedResponse(BaseModel):
 
 
 class CacheEntry(BaseModel):
-    """A single cache entry with request/response pair."""
+    """
+    A single cache entry with request/response pair.
+
+    Transport model used between router and storage. The storage layer
+    persists these as tape files + response files on disk.
+    """
 
     request: CachedRequest
     response: CachedResponse
@@ -41,245 +82,651 @@ class CacheEntry(BaseModel):
 
 
 class CacheStorage:
-    """File-based storage for API call caching."""
+    """
+    File-based storage for API call caching using the v2 tape format.
+
+    Manages a directory containing:
+    - `requests/` — human-readable `.tape` cassette files
+    - `responses/` — content-addressed response JSON / NDJSON files
+    - `assets/` — content-addressed binary files (images, audio)
+    - `index.tsv` — TSV index for fast lookup
+
+    Supports multi-reply cassettes for non-greedy sampling and tiered
+    fuzzy lookup via the `TapeIndex`.
+    """
+
+    # Headers stripped from stored cassettes to prevent leaking credentials.
+    _SANITIZED_HEADERS = {"authorization", "x-api-key", "proxy-authorization"}
 
     def __init__(self, cache_dir: str | Path = ".inference_cache") -> None:
-        """Initialize cache storage.
+        """
+        Initialize cache storage with v2 directory structure.
 
-        Args:
-            cache_dir: Directory to store cache files
+        Creates the `requests/`, `responses/`, and `assets/` subdirectories
+        and loads (or creates) the `index.tsv`.
+
+        `cache_dir` is the root directory for all storage.
         """
         self.log = logging.getLogger("CacheStorage")
         self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        # Lazily-built index mapping prompt_hash -> cache_key for fast fuzzy lookups.
-        # Populated on the first call to get_by_prompt_hash() and kept in sync by put().
-        self._prompt_hash_index: dict[str, str] | None = None
+        self.requests_dir = self.cache_dir / "requests"
+        self.responses_dir = self.cache_dir / "responses"
+        self.assets_dir = self.cache_dir / "assets"
 
-    # Fields excluded from cache key computation so that streaming and
-    # non-streaming requests for the same prompt share the same entry.
-    _CACHE_KEY_EXCLUDED_FIELDS = {"stream", "stream_options"}
+        # Create directory structure
+        for d in (self.cache_dir, self.requests_dir, self.responses_dir, self.assets_dir):
+            d.mkdir(parents=True, exist_ok=True)
 
-    # Headers stripped from stored cassettes to prevent leaking credentials.
-    # Applied as a defense-in-depth measure in put() before writing to disk.
-    _SANITIZED_HEADERS = {"authorization", "x-api-key", "proxy-authorization"}
-
-    def _compute_cache_key(self, request: CachedRequest) -> str:
-        """Compute a unique cache key for a request.
-
-        The `stream` and `stream_options` fields are excluded from the request
-        body before hashing so that streaming and non-streaming requests for the
-        same prompt share the same cache entry (the router may inject these
-        fields when forcing streaming on the upstream request).
-
-        Args:
-            request: The request to compute key for
-
-        Returns:
-            A unique hash string for this request
-        """
-        # Build a body copy without streaming-related fields so that
-        # stream=True and stream=False requests resolve to the same key.
-        body_for_key = request.body
-        if body_for_key is not None and isinstance(body_for_key, dict):
-            excluded = self._CACHE_KEY_EXCLUDED_FIELDS
-            if excluded & body_for_key.keys():
-                body_for_key = {k: v for k, v in body_for_key.items() if k not in excluded}
-
-        # Include relevant request data for caching
-        key_data = {
-            "method": request.method,
-            "path": request.path,
-            "body": body_for_key,
-        }
-        key_string = json.dumps(key_data, sort_keys=True)
-        return hashlib.sha256(key_string.encode()).hexdigest()[:32]
-
-    def _get_cache_file(self, cache_key: str) -> Path:
-        """Get the cache file path for a given key."""
-        return self.cache_dir / f"{cache_key}.json"
+        # Load or create the index
+        self.index = TapeIndex(self.cache_dir / "index.tsv")
 
     def get(self, request: CachedRequest) -> CacheEntry | None:
-        """Look up a cached response for a request.
-
-        Args:
-            request: The request to look up
-
-        Returns:
-            CacheEntry if found, None otherwise
         """
-        cache_key = self._compute_cache_key(request)
-        cache_file = self._get_cache_file(cache_key)
+        Look up a cached response by exact content hash.
 
-        if not cache_file.exists():
+        Computes the content hash from the request, looks it up in the index,
+        loads the tape file and response data, and returns a `CacheEntry`.
+
+        Returns None on cache miss.
+        """
+        content_hash = compute_content_hash(request.method, request.path, request.body)
+        index_row = self.index.by_content_hash.get(content_hash)
+        if index_row is None:
             return None
 
-        with open(cache_file, encoding="utf-8") as f:
-            data = json.load(f)
-        return CacheEntry.model_validate(data)
+        return self._load_entry(content_hash, request)
 
-    def _build_prompt_hash_index(self) -> dict[str, str]:
-        """Build an in-memory index mapping prompt_hash to cache_key.
-
-        Scans all cassette files once and returns a ``{prompt_hash: cache_key}``
-        dict. Files are processed in sorted order so that the *first* match for
-        a given prompt_hash is deterministic across filesystems.
-
-        Returns:
-            Mapping of prompt_hash to cache_key
+    def get_by_hashes(self, content_hash: str | None = None, prompt_model_hash: str | None = None,
+                      prompt_hash: str | None = None) -> IndexRow | None:
         """
-        index: dict[str, str] = {}
-        for cache_file in sorted(self.cache_dir.glob("*.json")):
-            try:
-                with open(cache_file, encoding="utf-8") as f:
-                    data = json.load(f)
-                entry = CacheEntry.model_validate(data)
-                if entry.prompt_hash and entry.prompt_hash not in index:
-                    index[entry.prompt_hash] = cache_file.stem
-            except (json.JSONDecodeError, ValidationError):
-                self.log.debug("Skipping unreadable cache file %s during index build", cache_file)
-                continue
-        return index
+        Look up an index row by any of the three hash tiers.
 
-    def get_by_prompt_hash(self, prompt_hash: str) -> CacheEntry | None:
-        """Look up a cached entry by prompt hash, ignoring the model.
-
-        Uses a lazily-built in-memory index (``prompt_hash`` → ``cache_key``)
-        to avoid scanning the entire cache directory on every call. The index
-        is built once on the first lookup and kept in sync when new entries
-        are stored via ``put()``.
-
-        When multiple cassettes share the same prompt hash, the one whose
-        filename sorts first is returned (deterministic across runs).
-
-        This is used for fuzzy model matching: when an exact cache key miss
-        occurs, the caller can compute the prompt hash from the request
-        messages and search for any cached entry with the same prompt
-        regardless of which model was used to record it.
-
-        Args:
-            prompt_hash: The prompt hash to search for
-
-        Returns:
-            CacheEntry if a matching entry is found, None otherwise
+        Tries exact match first, then prompt_model_hash, then prompt_hash.
+        Returns the first matching `IndexRow`, or None.
         """
-        for attempt in range(2):
-            if self._prompt_hash_index is None:
-                self._prompt_hash_index = self._build_prompt_hash_index()
+        if content_hash:
+            row = self.index.by_content_hash.get(content_hash)
+            if row is not None:
+                return row
 
-            cache_key = self._prompt_hash_index.get(prompt_hash)
-            if cache_key is None:
-                # No entry for this prompt_hash in the current index; nothing to return
-                return None
+        if prompt_model_hash:
+            rows = self.index.by_prompt_model_hash.get(prompt_model_hash, [])
+            if rows:
+                return rows[0]
 
-            cache_file = self._get_cache_file(cache_key)
-            if not cache_file.exists():
-                # File was removed after the index was built; rebuild to pick up alternatives
-                self.log.debug("Cache file %s for prompt_hash %s missing during fuzzy lookup (attempt %d); rebuilding index", cache_file,
-                               prompt_hash, attempt + 1)
-                self._prompt_hash_index = None
-                # Retry once with a rebuilt index to find an alternative cassette, if any
-                continue
+        if prompt_hash:
+            rows = self.index.by_prompt_hash.get(prompt_hash, [])
+            if rows:
+                return rows[0]
 
-            try:
-                with open(cache_file, encoding="utf-8") as f:
-                    data = json.load(f)
-                entry = CacheEntry.model_validate(data)
-                self.log.debug("Fuzzy match found in %s (model=%s)", cache_key, entry.model)
-                return entry
-            except (json.JSONDecodeError, ValidationError):
-                self.log.debug("Skipping unreadable cache file %s during fuzzy lookup (attempt %d); rebuilding index", cache_file,
-                               attempt + 1)
-                # Invalidate and rebuild to pick up alternative entries for this prompt_hash
-                self._prompt_hash_index = None
-                # Retry once with a rebuilt index to find an alternative cassette, if any
-                continue
-
-        # After retrying once with a rebuilt index, no valid entry was found
         return None
 
-    def put(self, entry: CacheEntry) -> str:
-        """Store a cache entry.
-
-        Sensitive headers (Authorization, X-Api-Key, etc.) are stripped from
-        the stored request headers to prevent credential leakage in committed
-        cassettes.
-
-        Args:
-            entry: The cache entry to store
-
-        Returns:
-            The cache key used
+    def put(self, entry: CacheEntry, max_replies: int = 1) -> str:
         """
-        cache_key = self._compute_cache_key(entry.request)
-        cache_file = self._get_cache_file(cache_key)
+        Store a new cache entry as a tape file + response files.
 
-        data = entry.model_dump()
-        # Strip sensitive headers from the stored request to prevent credential leakage
-        if data.get("request", {}).get("headers"):
-            data["request"]["headers"] = {k: v for k, v in data["request"]["headers"].items() if k.lower() not in self._SANITIZED_HEADERS}
+        Creates the tape with the first reply. If a tape for this request
+        already exists (same content hash), appends the reply instead.
 
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        Returns the content hash used as the cassette key.
+        """
+        body = entry.request.body
+        method = entry.request.method
+        path = entry.request.path
 
-        # Keep the prompt_hash index in sync if it has been built
-        if self._prompt_hash_index is not None and entry.prompt_hash:
-            current_key = self._prompt_hash_index.get(entry.prompt_hash)
-            if current_key is None or cache_key < current_key:
-                # Always keep the lexicographically smallest cache key for a given prompt_hash
-                self._prompt_hash_index[entry.prompt_hash] = cache_key
+        # Compute all three hash tiers
+        content_hash = compute_content_hash(method, path, body)
+        pm_hash = compute_prompt_model_hash(method, path, body)
+        p_hash = compute_prompt_hash(body)
 
-        return cache_key
+        # Check if this cassette already exists (append reply)
+        existing_row = self.index.by_content_hash.get(content_hash)
+        if existing_row is not None:
+            return self._append_reply(content_hash, entry, existing_row)
+
+        # Store response files
+        response_hash, has_stream = self._store_response(entry.response)
+
+        # Extract metadata from request
+        sampling = extract_sampling_params(body) if body else SamplingParams()
+        slug = generate_slug(body)
+        first_user_msg = extract_first_user_message(body)
+
+        # Build reply info
+        reply_info = self._build_reply_info(1, response_hash, has_stream, entry.response)
+
+        # Build tape metadata
+        tools_summary = []
+        if body and body.get("tools"):
+            for tool in body["tools"]:
+                if isinstance(tool, dict):
+                    fname = tool.get("function", {}).get("name", "") if isinstance(tool.get("function"), dict) else ""
+                    tools_summary.append(fname or tool.get("name", ""))
+
+        # Gather all text content that will appear in the tape for boundary collision check
+        message_sections = build_message_sections(body, "")  # boundary placeholder
+        all_text = "\n".join(s.body for s in message_sections if s.body)
+        all_text += "\n" + reply_info.text
+        boundary = generate_boundary(all_text)
+
+        metadata = TapeMetadata(
+            tape_version=1,
+            content_hash=content_hash,
+            prompt_model_hash=pm_hash,
+            prompt_hash=p_hash,
+            model=entry.model,
+            endpoint=path,
+            sampling=sampling,
+            max_tokens=body.get("max_tokens") if body else None,
+            stop_sequences=body.get("stop") or body.get("stop_sequences") or [] if body else [],
+            tools=tools_summary,
+            tool_choice=body.get("tool_choice") if body else None,
+            logprobs=bool(body.get("logprobs")) if body else False,
+            top_logprobs=body.get("top_logprobs") if body else None,
+            recorded=datetime.now(timezone.utc),
+            replies=1,
+            max_replies=max_replies,
+            boundary=boundary,
+        )
+
+        # Build sections with correct boundary
+        sections = build_message_sections(body, boundary)
+        sections.extend(build_reply_section(reply_info))
+
+        # Write tape file
+        tape_filename = f"{content_hash}__{slug}.tape" if slug else f"{content_hash}.tape"
+        tape_path = self.requests_dir / tape_filename
+        write_tape_to_file(tape_path, metadata, sections)
+
+        # Update index
+        index_row = IndexRow.from_tape_metadata(
+            metadata,
+            slug=slug,
+            first_user_message=first_user_msg,
+            tokens_in=str(reply_info.input_tokens or ""),
+            tokens_out=str(reply_info.output_tokens or ""),
+        )
+        self.index.add(index_row)
+
+        self.log.info("Stored new cassette %s (model=%s, replies=1)", content_hash, entry.model)
+        return content_hash
+
+    def _append_reply(self, content_hash: str, entry: CacheEntry, existing_row: IndexRow) -> str:
+        """
+        Append a new reply to an existing tape file.
+
+        Stores the response files, adds a reply section to the tape,
+        and updates the index.
+        """
+        # Store response files
+        response_hash, has_stream = self._store_response(entry.response)
+
+        # Find the tape file
+        tape_path = self._find_tape_file(content_hash)
+        if tape_path is None:
+            self.log.error("Tape file for %s not found during append", content_hash)
+            # Fall through to create a new tape
+            return self.put(entry, max_replies=existing_row.max_replies)
+
+        new_reply_count = existing_row.replies + 1
+        reply_info = self._build_reply_info(new_reply_count, response_hash, has_stream, entry.response)
+
+        # Append to tape file
+        append_reply_to_tape(tape_path, reply_info, new_reply_count)
+
+        # Update index
+        self.index.update_replies(
+            content_hash,
+            new_reply_count,
+            tokens_in=str(reply_info.input_tokens or ""),
+            tokens_out=str(reply_info.output_tokens or ""),
+        )
+
+        self.log.info("Appended reply %d to cassette %s", new_reply_count, content_hash)
+        return content_hash
+
+    def load_response(self, response_hash: str, streaming: bool = False) -> CachedResponse | None:
+        """
+        Load a response from the `responses/` directory by hash.
+
+        If `streaming` is True and a `.chunks.ndjson` file exists, loads
+        SSE chunks. Otherwise loads the `.json` response body.
+
+        Returns a `CachedResponse` or None if the file is not found.
+        """
+        if streaming:
+            ndjson_path = self.responses_dir / f"{response_hash}.chunks.ndjson"
+            if ndjson_path.exists():
+                chunks = ndjson_path.read_text(encoding="utf-8").splitlines()
+                # Re-wrap as SSE data lines
+                sse_chunks = [f"data: {line}\n\n" for line in chunks if line.strip()]
+                sse_chunks.append("data: [DONE]\n\n")
+                return CachedResponse(
+                    status_code=200,
+                    headers={"Content-Type": "text/event-stream"},
+                    chunks=sse_chunks,
+                    is_streaming=True,
+                )
+
+        json_path = self.responses_dir / f"{response_hash}.json"
+        if json_path.exists():
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            return CachedResponse(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body=data,
+                is_streaming=False,
+            )
+
+        return None
+
+    def load_tape(self, content_hash: str) -> tuple[TapeMetadata, list] | None:
+        """
+        Load and parse a tape file by content hash.
+
+        Returns a tuple of (`TapeMetadata`, list of `TapeSection`) or None.
+        """
+        tape_path = self._find_tape_file(content_hash)
+        if tape_path is None:
+            return None
+        content = tape_path.read_text(encoding="utf-8")
+        return parse_tape(content)
+
+    def get_reply_response_hashes(self, content_hash: str) -> list[str]:
+        """
+        Get the response hashes for all replies in a cassette.
+
+        Returns a list of response hash strings, ordered by reply number.
+        """
+        result = self.load_tape(content_hash)
+        if result is None:
+            return []
+
+        from inference_gate.recording.models import SectionKind
+        _, sections = result
+        hashes = []
+        for section in sections:
+            if section.kind == SectionKind.REPLY:
+                resp = section.metadata.get("Response", "")
+                # Strip .json extension if present
+                resp_hash = resp.removesuffix(".json")
+                if resp_hash:
+                    hashes.append(resp_hash)
+        return hashes
 
     def exists(self, request: CachedRequest) -> bool:
-        """Check if a request is cached.
-
-        Args:
-            request: The request to check
-
-        Returns:
-            True if cached, False otherwise
         """
-        cache_key = self._compute_cache_key(request)
-        return self._get_cache_file(cache_key).exists()
+        Check if a request has a cached cassette.
+        """
+        content_hash = compute_content_hash(request.method, request.path, request.body)
+        return content_hash in self.index
 
     def clear(self) -> int:
-        """Clear all cached entries.
+        """
+        Clear all cached entries (tapes, responses, assets, index).
 
-        Returns:
-            Number of entries cleared
+        Returns the number of tape files removed.
         """
         count = 0
-        for cache_file in self.cache_dir.glob("*.json"):
-            cache_file.unlink()
+        for tape_file in self.requests_dir.glob("*.tape"):
+            tape_file.unlink()
             count += 1
-        # Invalidate the prompt_hash index since all entries are gone
-        self._prompt_hash_index = None
+        # Clear responses and assets
+        for resp_file in self.responses_dir.iterdir():
+            resp_file.unlink()
+        for asset_file in self.assets_dir.iterdir():
+            asset_file.unlink()
+        # Reset index
+        self.index = TapeIndex(self.cache_dir / "index.tsv")
+        index_path = self.cache_dir / "index.tsv"
+        if index_path.exists():
+            index_path.unlink()
+        self.index = TapeIndex(index_path)
         return count
 
     def list_entries(self) -> list[tuple[str, CacheEntry]]:
-        """List all cached entries.
+        """
+        List all cached entries.
 
-        Returns:
-            List of (cache_key, entry) tuples
+        Returns a list of (content_hash, CacheEntry) tuples.
+        For the CacheEntry, only metadata fields are populated; the full
+        response body is not loaded (use `load_response()` for that).
         """
         entries = []
-        for cache_file in self.cache_dir.glob("*.json"):
-            cache_key = cache_file.stem
-            with open(cache_file, encoding="utf-8") as f:
-                data = json.load(f)
-            entries.append((cache_key, CacheEntry.model_validate(data)))
+        for row in self.index._rows:
+            # Build a lightweight CacheEntry from index data
+            entry = CacheEntry(
+                request=CachedRequest(method="POST", path="", headers={}, body=None),
+                response=CachedResponse(status_code=200, headers={}, is_streaming=False),
+                model=row.model,
+                temperature=float(row.temperature) if row.temperature else None,
+                prompt_hash=row.prompt_hash,
+            )
+            entries.append((row.content_hash, entry))
         return entries
+
+    def reindex(self) -> int:
+        """
+        Rebuild the index from tape files on disk.
+
+        Returns the number of entries indexed.
+        """
+        self.index.rebuild(self.requests_dir)
+        return len(self.index)
+
+    def resolve_prefix(self, prefix: str) -> list[IndexRow]:
+        """
+        Resolve a content_hash prefix to matching IndexRow(s).
+
+        Supports both exact 12-char hashes and shorter prefixes (like git short hashes).
+        Returns all rows whose `content_hash` starts with `prefix`.
+        """
+        prefix_lower = prefix.lower()
+        # Fast path: exact match
+        exact = self.index.by_content_hash.get(prefix_lower)
+        if exact is not None:
+            return [exact]
+        # Prefix search
+        return [row for row in self.index._rows if row.content_hash.startswith(prefix_lower)]
+
+    def delete_entry(self, content_hash: str) -> bool:
+        """
+        Delete a single cassette by content_hash.
+
+        Removes the tape file from `requests/`, all associated response files
+        from `responses/`, and removes the entry from the TSV index.
+
+        Returns True if the entry was found and deleted, False otherwise.
+        """
+        # Must find tape to discover response hashes before deleting
+        tape_path = self._find_tape_file(content_hash)
+        if tape_path is None:
+            self.log.warning("Cannot delete: tape file for %s not found", content_hash)
+            return False
+
+        # Get response hashes before deleting
+        response_hashes = self.get_reply_response_hashes(content_hash)
+
+        # Delete response files
+        for resp_hash in response_hashes:
+            json_path = self.responses_dir / f"{resp_hash}.json"
+            ndjson_path = self.responses_dir / f"{resp_hash}.chunks.ndjson"
+            if json_path.exists():
+                json_path.unlink()
+            if ndjson_path.exists():
+                ndjson_path.unlink()
+
+        # Delete tape file
+        tape_path.unlink()
+
+        # Remove from index
+        self.index.remove(content_hash)
+
+        self.log.info("Deleted cassette %s (%d response files)", content_hash, len(response_hashes))
+        return True
+
+    def search_entries(self, query: str, model: str | None = None, limit: int = 20) -> list[IndexRow]:
+        """
+        Search cassettes by substring match on `first_user_message` and `slug`.
+
+        Case-insensitive matching. Optionally filters by model name (substring).
+        Returns up to `limit` matching IndexRows.
+        """
+        query_lower = query.lower()
+        results: list[IndexRow] = []
+        for row in self.index._rows:
+            if query_lower in row.first_user_message.lower() or query_lower in row.slug.lower():
+                if model is None or model.lower() in row.model.lower():
+                    results.append(row)
+                    if len(results) >= limit:
+                        break
+        return results
+
+    def filter_entries(self, model: str | None = None, greedy: bool | None = None, has_tools: bool | None = None,
+                       has_logprobs: bool | None = None, after: str | None = None, before: str | None = None, sort_by: str = "recorded",
+                       limit: int | None = None) -> list[IndexRow]:
+        """
+        Filter and sort index rows by various criteria.
+
+        `model` filters by substring match on model name (case-insensitive).
+        `greedy` filters by is_greedy flag (True = only greedy, False = only non-greedy).
+        `has_tools` filters by has_tool_use flag.
+        `has_logprobs` filters by has_logprobs flag.
+        `after` / `before` filter by recorded timestamp (ISO 8601 prefix match).
+        `sort_by` is the field name to sort by: `recorded`, `model`, `tokens_in`, `tokens_out`.
+        `limit` caps the number of results returned.
+
+        Returns a list of matching IndexRows.
+        """
+        rows = list(self.index._rows)
+
+        if model is not None:
+            model_lower = model.lower()
+            rows = [r for r in rows if model_lower in r.model.lower()]
+
+        if greedy is not None:
+            rows = [r for r in rows if r.is_greedy == greedy]
+
+        if has_tools is not None:
+            rows = [r for r in rows if r.has_tool_use == has_tools]
+
+        if has_logprobs is not None:
+            rows = [r for r in rows if r.has_logprobs == has_logprobs]
+
+        if after is not None:
+            rows = [r for r in rows if r.recorded >= after]
+
+        if before is not None:
+            rows = [r for r in rows if r.recorded < before]
+
+        # Sort
+        sort_key_map = {
+            "recorded": lambda r: r.recorded,
+            "model": lambda r: r.model.lower(),
+            "tokens_in": lambda r: int(r.tokens_in) if r.tokens_in.isdigit() else 0,
+            "tokens_out": lambda r: int(r.tokens_out) if r.tokens_out.isdigit() else 0,
+        }
+        key_fn = sort_key_map.get(sort_by, sort_key_map["recorded"])
+        rows.sort(key=key_fn, reverse=(sort_by == "recorded"))
+
+        if limit is not None:
+            rows = rows[:limit]
+
+        return rows
+
+    def get_disk_size(self) -> int:
+        """
+        Calculate the total disk size of the cache directory in bytes.
+
+        Walks `requests/`, `responses/`, `assets/`, and `index.tsv`.
+        """
+        total = 0
+        for dirpath in (self.requests_dir, self.responses_dir, self.assets_dir):
+            if dirpath.exists():
+                for f in dirpath.iterdir():
+                    if f.is_file():
+                        total += f.stat().st_size
+        index_path = self.cache_dir / "index.tsv"
+        if index_path.exists():
+            total += index_path.stat().st_size
+        return total
 
     @staticmethod
     def compute_prompt_hash(messages: list[dict[str, Any]]) -> str:
-        """Compute a hash for prompt messages.
-
-        Args:
-            messages: List of message dicts
-
-        Returns:
-            Hash string for the prompt
         """
-        prompt_str = json.dumps(messages, sort_keys=True)
-        return hashlib.sha256(prompt_str.encode()).hexdigest()[:16]
+        Compute a hash for prompt messages (convenience static method).
+
+        Delegates to the hashing module.
+        """
+        return compute_prompt_hash({"messages": messages})
+
+    # ---- Internal helpers ----
+
+    def _store_response(self, response: CachedResponse) -> tuple[str, bool]:
+        """
+        Store a response to the `responses/` directory.
+
+        Handles both streaming (chunks → NDJSON) and non-streaming (body → JSON).
+        Computes a content hash for deduplication.
+
+        Returns a tuple of (response_hash, has_stream).
+        """
+        has_stream = False
+
+        if response.is_streaming and response.chunks:
+            # Reassemble the response to get a JSON body for hashing and storage
+            from inference_gate.recording.reassembly import reassemble_streaming_response
+            reassembled = reassemble_streaming_response(response.chunks, "")
+            if reassembled:
+                response_hash = compute_response_hash(reassembled)
+            else:
+                # Fallback: hash the raw chunks
+                import hashlib
+                raw = "".join(response.chunks)
+                response_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+            # Store NDJSON chunks (stripped SSE framing)
+            ndjson_path = self.responses_dir / f"{response_hash}.chunks.ndjson"
+            if not ndjson_path.exists():
+                lines = []
+                for chunk in response.chunks:
+                    for line in chunk.splitlines():
+                        line = line.strip()
+                        if line.startswith("data:"):
+                            data_str = line[len("data:"):].strip()
+                            if data_str and data_str != "[DONE]":
+                                lines.append(data_str)
+                ndjson_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            has_stream = True
+
+            # Store reassembled JSON
+            json_path = self.responses_dir / f"{response_hash}.json"
+            if not json_path.exists() and reassembled:
+                json_path.write_text(json.dumps(reassembled, ensure_ascii=False), encoding="utf-8")
+
+        elif response.body is not None:
+            response_hash = compute_response_hash(response.body)
+            json_path = self.responses_dir / f"{response_hash}.json"
+            if not json_path.exists():
+                json_path.write_text(json.dumps(response.body, ensure_ascii=False), encoding="utf-8")
+        else:
+            # Empty response (e.g. error with no body)
+            import hashlib
+            response_hash = hashlib.sha256(b"empty").hexdigest()[:12]
+
+        return response_hash, has_stream
+
+    def _build_reply_info(self, reply_number: int, response_hash: str, has_stream: bool, response: CachedResponse) -> ReplyInfo:
+        """
+        Build a `ReplyInfo` from a response, extracting text and token counts.
+        """
+        text = ""
+        stop_reason = None
+        input_tokens = None
+        output_tokens = None
+        tool_calls: list[tuple[str, str, str]] = []
+
+        # Try to extract info from JSON body or reassembled response
+        body = response.body
+        if body is None and response.is_streaming and response.chunks:
+            from inference_gate.recording.reassembly import reassemble_streaming_response
+            body = reassemble_streaming_response(response.chunks, "")
+
+        if body and isinstance(body, dict):
+            # Chat Completions format
+            choices = body.get("choices", [])
+            if choices:
+                choice = choices[0]
+                message = choice.get("message", {})
+                text = message.get("content") or ""
+                stop_reason = choice.get("finish_reason")
+
+                # Extract tool calls
+                for tc in message.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    tool_calls.append((
+                        fn.get("name", ""),
+                        tc.get("id", ""),
+                        fn.get("arguments", "{}"),
+                    ))
+
+            # Responses API format
+            if not choices and body.get("output"):
+                outputs = body["output"]
+                for item in outputs:
+                    if isinstance(item, dict) and item.get("type") == "message":
+                        for content in item.get("content", []):
+                            if isinstance(content, dict) and content.get("type") == "output_text":
+                                text = content.get("text", "")
+                stop_reason = body.get("status")
+
+            # Usage
+            usage = body.get("usage", {})
+            if usage:
+                input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+                output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+
+        return ReplyInfo(
+            reply_number=reply_number,
+            response_hash=response_hash,
+            has_stream=has_stream,
+            stop_reason=stop_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            text=text,
+            tool_calls=tool_calls,
+        )
+
+    def _find_tape_file(self, content_hash: str) -> Path | None:
+        """
+        Find the tape file for a given content hash.
+
+        Tape filenames are `{content_hash}__{slug}.tape` or `{content_hash}.tape`.
+        """
+        # Check index for slug
+        matches = list(self.requests_dir.glob(f"{content_hash}*.tape"))
+        if matches:
+            return matches[0]
+        return None
+
+    def _load_entry(self, content_hash: str, request: CachedRequest | None = None) -> CacheEntry | None:
+        """
+        Load a full CacheEntry from tape + response files.
+
+        Loads the first reply's response by default.
+        """
+        result = self.load_tape(content_hash)
+        if result is None:
+            return None
+
+        metadata, sections = result
+
+        # Find first reply section's response hash
+        response_hashes = self.get_reply_response_hashes(content_hash)
+        if not response_hashes:
+            return None
+
+        # Load the first reply's response (caller can request specific via load_response)
+        response_hash = response_hashes[0]
+        cached_response = self.load_response(response_hash, streaming=True)
+
+        # Fall back to non-streaming if no NDJSON
+        if cached_response is None:
+            cached_response = self.load_response(response_hash, streaming=False)
+
+        if cached_response is None:
+            self.log.warning("Response %s not found for cassette %s", response_hash, content_hash)
+            return None
+
+        # Build transport CacheEntry
+        if request is None:
+            request = CachedRequest(method="POST", path=metadata.endpoint, headers={}, body=None)
+
+        return CacheEntry(
+            request=request,
+            response=cached_response,
+            model=metadata.model,
+            temperature=metadata.sampling.temperature,
+            prompt_hash=metadata.prompt_hash,
+            original_client_streaming=None,
+        )

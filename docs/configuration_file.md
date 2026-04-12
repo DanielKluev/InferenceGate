@@ -42,7 +42,9 @@ upstream: "http://10.100.3.38:8000/"
 cache_dir: caches/my_project
 verbose: false
 upstream_timeout: 300.0
-fuzzy_model_matching: false
+fuzzy_model: false
+fuzzy_sampling: "off"
+max_non_greedy_replies: 5
 non_streaming_models:
   - "o1-preview"
   - "o1-mini"
@@ -78,7 +80,9 @@ api_key: "sk-..."
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `fuzzy_model_matching` | boolean | `false` | When enabled, on a cache miss, InferenceGate looks for cached entries with the same prompt but a different model name. Useful when switching between equivalent models. |
+| `fuzzy_model` | boolean | `false` | When enabled, on a cache miss, InferenceGate looks for cached entries with the same prompt but a different model name. Useful when switching between equivalent models. |
+| `fuzzy_sampling` | string | `"off"` | Controls fuzzy matching of sampling parameters. `"off"` = exact match only. `"soft"` = match non-greedy requests with different sampling params (greedy stays exact). `"aggressive"` = match across any sampling param difference, including greedy ↔ non-greedy. |
+| `max_non_greedy_replies` | integer | `5` | Maximum number of distinct replies to collect in a cassette for non-greedy (temperature > 0) requests before cycling through existing replies. Greedy requests always store exactly 1 reply. |
 
 ### Streaming Settings
 
@@ -113,7 +117,9 @@ The following table shows how configuration file fields map to CLI options on th
 | `api_key` | `--api-key` / `-k` | `start` |
 | `upstream_timeout` | `--upstream-timeout` | `start` |
 | `cache_dir` | `--cache-dir` / `-c` | `start`, `replay` |
-| `fuzzy_model_matching` | `--fuzzy-model-matching` / `--no-fuzzy-model-matching` | `start`, `replay` |
+| `fuzzy_model` | `--fuzzy-model` / `--no-fuzzy-model` | `start`, `replay` |
+| `fuzzy_sampling` | `--fuzzy-sampling` | `start`, `replay` |
+| `max_non_greedy_replies` | `--max-non-greedy-replies` | `start`, `replay` |
 | `verbose` | `--verbose` / `-v` | `start`, `replay` |
 
 ## Managing Configuration

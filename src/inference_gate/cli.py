@@ -19,6 +19,8 @@ from typing import Any
 import aiohttp
 import click
 
+from inference_gate.cli_format import (format_index_rows_json, format_index_rows_table, format_reply_human, format_reply_json,
+                                       format_stats_human, format_stats_json, format_tape_detail_human, format_tape_detail_json)
 from inference_gate.config import Config, ConfigManager
 from inference_gate.inference_gate import InferenceGate
 from inference_gate.modes import Mode
@@ -92,14 +94,19 @@ def main(ctx: click.Context, config_path: str | None) -> None:
 @click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (defaults to OPENAI_API_KEY env var)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
-@click.option("--fuzzy-model-matching/--no-fuzzy-model-matching", default=None,
+@click.option("--fuzzy-model/--no-fuzzy-model", default=None,
               help="Enable or disable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
+@click.option("--fuzzy-sampling", default=None, type=click.Choice(["off", "soft", "aggressive"]),
+              help="Sampling parameter fuzzy matching: off (exact), soft (non-greedy matches non-greedy), aggressive (any match)")
+@click.option("--max-non-greedy-replies", default=None, type=int,
+              help="Max replies to collect per non-greedy cassette before cycling (default: 5)")
 @click.option("--upstream-timeout", default=None, type=float,
               help="Timeout in seconds for upstream API requests before returning 504 (default: 120.0)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
-          web_ui: bool, web_ui_port: int, fuzzy_model_matching: bool | None, upstream_timeout: float | None, verbose: bool | None) -> None:
+          web_ui: bool, web_ui_port: int, fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None,
+          upstream_timeout: float | None, verbose: bool | None) -> None:
     """
     Start in record-and-replay mode (default).
 
@@ -117,22 +124,28 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     actual_upstream = upstream if upstream is not None else config.upstream
     actual_api_key = api_key if api_key is not None else config.api_key
     actual_verbose = verbose if verbose is not None else config.verbose
-    actual_fuzzy = fuzzy_model_matching if fuzzy_model_matching is not None else config.fuzzy_model_matching
+    actual_fuzzy_model = fuzzy_model if fuzzy_model is not None else config.fuzzy_model
+    actual_fuzzy_sampling = fuzzy_sampling if fuzzy_sampling is not None else config.fuzzy_sampling
+    actual_max_replies = max_non_greedy_replies if max_non_greedy_replies is not None else config.max_non_greedy_replies
     actual_timeout = upstream_timeout if upstream_timeout is not None else config.upstream_timeout
 
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.RECORD_AND_REPLAY, cache_dir=actual_cache_dir,
                          upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port,
-                         fuzzy_model_matching=actual_fuzzy, upstream_timeout=actual_timeout)
+                         fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling, max_non_greedy_replies=actual_max_replies,
+                         upstream_timeout=actual_timeout)
 
     click.echo("Starting InferenceGate in record-and-replay mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Upstream: {actual_upstream}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
     click.echo(f"  Upstream timeout: {actual_timeout}s")
-    if actual_fuzzy:
+    if actual_fuzzy_model:
         click.echo("  Fuzzy model matching: enabled")
+    if actual_fuzzy_sampling != "off":
+        click.echo(f"  Fuzzy sampling: {actual_fuzzy_sampling}")
+    click.echo(f"  Max non-greedy replies: {actual_max_replies}")
     if web_ui:
         click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
@@ -145,12 +158,16 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
 @click.option("--cache-dir", "-c", default=None, help="Directory to store cached responses (default: .inference_cache)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
-@click.option("--fuzzy-model-matching/--no-fuzzy-model-matching", default=None,
+@click.option("--fuzzy-model/--no-fuzzy-model", default=None,
               help="Enable or disable fuzzy model matching: on cache miss, reuse entries with the same prompt but a different model")
+@click.option("--fuzzy-sampling", default=None, type=click.Choice(["off", "soft", "aggressive"]),
+              help="Sampling parameter fuzzy matching: off (exact), soft (non-greedy matches non-greedy), aggressive (any match)")
+@click.option("--max-non-greedy-replies", default=None, type=int,
+              help="Max replies to collect per non-greedy cassette before cycling (default: 5)")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
 def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, web_ui: bool, web_ui_port: int,
-           fuzzy_model_matching: bool | None, verbose: bool | None) -> None:
+           fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None, verbose: bool | None) -> None:
     """
     Start in replay-only mode.
 
@@ -166,18 +183,24 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
     actual_host = host if host is not None else config.host
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
     actual_verbose = verbose if verbose is not None else config.verbose
-    actual_fuzzy = fuzzy_model_matching if fuzzy_model_matching is not None else config.fuzzy_model_matching
+    actual_fuzzy_model = fuzzy_model if fuzzy_model is not None else config.fuzzy_model
+    actual_fuzzy_sampling = fuzzy_sampling if fuzzy_sampling is not None else config.fuzzy_sampling
+    actual_max_replies = max_non_greedy_replies if max_non_greedy_replies is not None else config.max_non_greedy_replies
 
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.REPLAY_ONLY, cache_dir=actual_cache_dir, web_ui=web_ui,
-                         web_ui_port=web_ui_port, fuzzy_model_matching=actual_fuzzy)
+                         web_ui_port=web_ui_port, fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling,
+                         max_non_greedy_replies=actual_max_replies)
 
     click.echo("Starting InferenceGate in replay-only mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
-    if actual_fuzzy:
+    if actual_fuzzy_model:
         click.echo("  Fuzzy model matching: enabled")
+    if actual_fuzzy_sampling != "off":
+        click.echo(f"  Fuzzy sampling: {actual_fuzzy_sampling}")
+    click.echo(f"  Max non-greedy replies: {actual_max_replies}")
     if web_ui:
         click.echo(f"  WebUI: http://127.0.0.1:{web_ui_port}")
 
@@ -186,90 +209,259 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
 
 @main.group()
 @click.pass_context
-def cache(ctx: click.Context) -> None:
-    """Cache management commands."""
+def cassette(ctx: click.Context) -> None:
+    """
+    Cassette management commands.
+
+    Inspect, search, read, and manage recorded inference cassettes.
+    All read commands support --json for machine-parseable output
+    (suitable for AI agentic consumption).
+    """
 
 
-@cache.command(name="list")
+def _resolve_cassette_id(storage: CacheStorage, cassette_id: str) -> str | None:
+    """
+    Resolve a cassette ID (full or prefix) to an exact content_hash.
+
+    Returns the content_hash if exactly one match is found.
+    Prints an error and returns None if zero or multiple matches found.
+    """
+    matches = storage.resolve_prefix(cassette_id)
+    if len(matches) == 0:
+        click.echo(f"Error: no cassette found matching '{cassette_id}'", err=True)
+        return None
+    if len(matches) > 1:
+        click.echo(f"Error: ambiguous cassette ID '{cassette_id}', matches {len(matches)} cassettes:", err=True)
+        for row in matches[:10]:
+            click.echo(f"  {row.content_hash}  {row.model}  {row.slug}", err=True)
+        if len(matches) > 10:
+            click.echo(f"  ... and {len(matches) - 10} more", err=True)
+        return None
+    return matches[0].content_hash
+
+
+@cassette.command(name="list")
 @click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.option("--model", "-m", default=None, help="Filter by model name (substring match)")
+@click.option("--greedy/--non-greedy", default=None, help="Filter by greedy / non-greedy sampling")
+@click.option("--has-tools", is_flag=True, default=None, help="Filter cassettes that use tools")
+@click.option("--has-logprobs", is_flag=True, default=None, help="Filter cassettes that have logprobs")
+@click.option("--after", default=None, help="Only cassettes recorded after this ISO 8601 date")
+@click.option("--before", default=None, help="Only cassettes recorded before this ISO 8601 date")
+@click.option("--sort", "sort_by", default="recorded", type=click.Choice(["recorded", "model", "tokens_in", "tokens_out"]),
+              help="Sort by field (default: recorded)")
+@click.option("--limit", "-n", default=None, type=int, help="Maximum number of results")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON array")
 @click.pass_context
-def cache_list(ctx: click.Context, cache_dir: str | None) -> None:
-    """List all cached entries."""
+def cassette_list(ctx: click.Context, cache_dir: str | None, model: str | None, greedy: bool | None, has_tools: bool | None,
+                  has_logprobs: bool | None, after: str | None, before: str | None, sort_by: str, limit: int | None, as_json: bool) -> None:
+    """List all cached cassettes with filtering and sorting."""
     config = get_config(ctx)
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
 
     storage = CacheStorage(actual_cache_dir)
-    entries = storage.list_entries()
+    rows = storage.filter_entries(model=model, greedy=greedy, has_tools=has_tools, has_logprobs=has_logprobs, after=after, before=before,
+                                  sort_by=sort_by, limit=limit)
 
-    if not entries:
-        click.echo("No cached entries found.")
+    if as_json:
+        click.echo(format_index_rows_json(rows))
+    else:
+        click.echo(format_index_rows_table(rows))
+
+
+@cassette.command(name="search")
+@click.argument("query")
+@click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.option("--model", "-m", default=None, help="Additional filter by model name (substring)")
+@click.option("--limit", "-n", default=20, type=int, help="Maximum number of results (default: 20)")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON array")
+@click.pass_context
+def cassette_search(ctx: click.Context, query: str, cache_dir: str | None, model: str | None, limit: int, as_json: bool) -> None:
+    """Search cassettes by prompt content.
+
+    Performs case-insensitive substring matching on the first user message
+    and slug fields. QUERY is the text to search for.
+    """
+    config = get_config(ctx)
+    actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
+
+    storage = CacheStorage(actual_cache_dir)
+    rows = storage.search_entries(query, model=model, limit=limit)
+
+    if as_json:
+        click.echo(format_index_rows_json(rows))
+    else:
+        click.echo(format_index_rows_table(rows))
+
+
+@cassette.command(name="show")
+@click.argument("cassette_id")
+@click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON object")
+@click.pass_context
+def cassette_show(ctx: click.Context, cassette_id: str, cache_dir: str | None, as_json: bool) -> None:
+    """Show cassette metadata, prompt, and reply summaries.
+
+    CASSETTE_ID is the content hash (or unique prefix) of the cassette to show.
+    Does not print full completion text — use 'read' for that.
+    """
+    config = get_config(ctx)
+    actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
+
+    storage = CacheStorage(actual_cache_dir)
+    resolved = _resolve_cassette_id(storage, cassette_id)
+    if resolved is None:
+        ctx.exit(1)
         return
 
-    click.echo(f"Found {len(entries)} cached entries:\n")
-    for cache_key, entry in entries:
-        click.echo(f"  [{cache_key}]")
-        click.echo(f"    Path: {entry.request.method} {entry.request.path}")
-        if entry.model:
-            click.echo(f"    Model: {entry.model}")
-        if entry.temperature is not None:
-            click.echo(f"    Temperature: {entry.temperature}")
-        click.echo(f"    Streaming: {entry.response.is_streaming}")
-        click.echo()
+    tape_data = storage.load_tape(resolved)
+    if tape_data is None:
+        click.echo(f"Error: tape file not found for cassette {resolved}", err=True)
+        ctx.exit(1)
+        return
+
+    metadata, sections = tape_data
+    index_row = storage.index.by_content_hash.get(resolved)
+
+    if as_json:
+        click.echo(format_tape_detail_json(resolved, metadata, sections, index_row))
+    else:
+        click.echo(format_tape_detail_human(resolved, metadata, sections, index_row))
 
 
-@cache.command(name="clear")
+@cassette.command(name="read")
+@click.argument("cassette_id")
+@click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.option("--reply", "-r", "reply_number", default=None, type=int, help="Show only a specific reply number")
+@click.option("--prompt", "-p", "include_prompt", is_flag=True, default=False, help="Also include the prompt messages")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON")
+@click.pass_context
+def cassette_read(ctx: click.Context, cassette_id: str, cache_dir: str | None, reply_number: int | None, include_prompt: bool,
+                  as_json: bool) -> None:
+    """Read full completion text of a cassette's replies.
+
+    CASSETTE_ID is the content hash (or unique prefix) of the cassette.
+    By default shows all replies. Use --reply N to select a specific one.
+    """
+    config = get_config(ctx)
+    actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
+
+    storage = CacheStorage(actual_cache_dir)
+    resolved = _resolve_cassette_id(storage, cassette_id)
+    if resolved is None:
+        ctx.exit(1)
+        return
+
+    tape_data = storage.load_tape(resolved)
+    if tape_data is None:
+        click.echo(f"Error: tape file not found for cassette {resolved}", err=True)
+        ctx.exit(1)
+        return
+
+    _, sections = tape_data
+
+    if as_json:
+        click.echo(format_reply_json(sections, reply_number=reply_number, include_prompt=include_prompt))
+    else:
+        click.echo(format_reply_human(sections, reply_number=reply_number, include_prompt=include_prompt))
+
+
+@cassette.command(name="delete")
+@click.argument("cassette_id")
 @click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
-def cache_clear(ctx: click.Context, cache_dir: str | None, yes: bool) -> None:
-    """Clear all cached entries."""
+def cassette_delete(ctx: click.Context, cassette_id: str, cache_dir: str | None, yes: bool) -> None:
+    """Delete a single cassette by ID.
+
+    CASSETTE_ID is the content hash (or unique prefix) of the cassette to delete.
+    Removes the tape file, associated response files, and updates the index.
+    """
     config = get_config(ctx)
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
 
     storage = CacheStorage(actual_cache_dir)
-    entries = storage.list_entries()
-
-    if not entries:
-        click.echo("No cached entries to clear.")
+    resolved = _resolve_cassette_id(storage, cassette_id)
+    if resolved is None:
+        ctx.exit(1)
         return
 
+    # Show what will be deleted
+    index_row = storage.index.by_content_hash.get(resolved)
+    if index_row:
+        click.echo(f"Cassette: {resolved}")
+        click.echo(f"  Model: {index_row.model}")
+        click.echo(f"  Slug: {index_row.slug}")
+        click.echo(f"  Replies: {index_row.replies}")
+
     if not yes:
-        if not click.confirm(f"Are you sure you want to clear {len(entries)} cached entries?"):
+        if not click.confirm("Delete this cassette?"):
             click.echo("Aborted.")
             return
 
-    count = storage.clear()
-    click.echo(f"Cleared {count} cached entries.")
+    if storage.delete_entry(resolved):
+        click.echo(f"Deleted cassette {resolved}")
+    else:
+        click.echo(f"Error: failed to delete cassette {resolved}", err=True)
+        ctx.exit(1)
 
 
-@cache.command(name="info")
+@cassette.command(name="stats")
 @click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON")
 @click.pass_context
-def cache_info(ctx: click.Context, cache_dir: str | None) -> None:
+def cassette_stats(ctx: click.Context, cache_dir: str | None, as_json: bool) -> None:
     """Show cache statistics."""
     config = get_config(ctx)
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
 
     storage = CacheStorage(actual_cache_dir)
-    entries = storage.list_entries()
+    rows = list(storage.index.by_content_hash.values())
 
-    click.echo(f"Cache directory: {actual_cache_dir}")
-    click.echo(f"Total entries: {len(entries)}")
+    total_entries = len(rows)
+    greedy_count = 0
+    non_greedy_count = 0
+    total_replies = 0
+    total_tokens_in = 0
+    total_tokens_out = 0
+    entries_by_model: dict[str, int] = {}
 
-    if entries:
-        models: dict[str, int] = {}
-        streaming_count = 0
-        for _, entry in entries:
-            if entry.model:
-                models[entry.model] = models.get(entry.model, 0) + 1
-            if entry.response.is_streaming:
-                streaming_count += 1
+    for row in rows:
+        if row.is_greedy:
+            greedy_count += 1
+        else:
+            non_greedy_count += 1
+        total_replies += row.replies
+        if row.tokens_in and row.tokens_in.isdigit():
+            total_tokens_in += int(row.tokens_in)
+        if row.tokens_out and row.tokens_out.isdigit():
+            total_tokens_out += int(row.tokens_out)
+        if row.model:
+            entries_by_model[row.model] = entries_by_model.get(row.model, 0) + 1
 
-        click.echo(f"Streaming responses: {streaming_count}")
-        if models:
-            click.echo("Models:")
-            for model, count in sorted(models.items()):
-                click.echo(f"  {model}: {count}")
+    disk_size = storage.get_disk_size()
+
+    if as_json:
+        click.echo(
+            format_stats_json(total_entries, total_replies, disk_size, greedy_count, non_greedy_count, entries_by_model, total_tokens_in,
+                              total_tokens_out))
+    else:
+        click.echo(
+            format_stats_human(total_entries, total_replies, disk_size, greedy_count, non_greedy_count, entries_by_model, total_tokens_in,
+                               total_tokens_out, actual_cache_dir))
+
+
+@cassette.command(name="reindex")
+@click.option("--cache-dir", "-c", default=None, help="Directory where cached responses are stored")
+@click.pass_context
+def cassette_reindex(ctx: click.Context, cache_dir: str | None) -> None:
+    """Rebuild the TSV index from tape files on disk."""
+    config = get_config(ctx)
+    actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
+
+    storage = CacheStorage(actual_cache_dir)
+    count = storage.reindex()
+    click.echo(f"Reindexed {count} tape files in {actual_cache_dir}")
 
 
 # =============================================================================
