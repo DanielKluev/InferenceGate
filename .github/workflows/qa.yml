@@ -1,0 +1,31 @@
+name: Quality Assurance
+
+on: [push]
+
+jobs:
+  quality_assurance:
+    runs-on: ubuntu-latest
+    name: Quality Assurance
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v3
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+
+    - name: Running tests with pytest (xdist loadscope)
+      run: pytest -n auto --dist loadscope
+
+    - name: Analyzing the main package with pylint
+      run: pylint --fail-under=9 src/inference_gate || true
+
+    - name: Analyzing the tests with pylint
+      run: pylint --fail-under=9 tests || true
