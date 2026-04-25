@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from inference_gate.recording.atomic_io import atomic_write_text
 from inference_gate.recording.models import ReplyInfo, SectionKind, TapeMetadata, TapeSection
 
 log = logging.getLogger("tape_writer")
@@ -65,7 +66,7 @@ def write_tape_to_file(filepath: Path, metadata: TapeMetadata, sections: list[Ta
     """
     filepath.parent.mkdir(parents=True, exist_ok=True)
     content = write_tape(metadata, sections)
-    filepath.write_text(content, encoding="utf-8")
+    atomic_write_text(filepath, content)
     log.debug("Wrote tape to %s", filepath)
 
 
@@ -286,6 +287,11 @@ def _serialize_frontmatter(metadata: TapeMetadata) -> str:
         if key != "is_greedy" and value is not None:
             clean_sampling[key] = value
     data["sampling"] = clean_sampling
+
+    # Drop the `metadata` block when empty so older parsers ignore it cleanly
+    # and tape diffs stay minimal for the common no-metadata case.
+    if isinstance(data.get("metadata"), dict) and not data["metadata"]:
+        data.pop("metadata")
 
     # Remove fields that are None
     data = {k: v for k, v in data.items() if v is not None}

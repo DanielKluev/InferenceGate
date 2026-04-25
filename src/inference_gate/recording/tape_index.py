@@ -16,6 +16,7 @@ import io
 import logging
 from pathlib import Path
 
+from inference_gate.recording.atomic_io import atomic_write_text
 from inference_gate.recording.models import IndexRow, SectionKind, TapeMetadata, TapeSection
 from inference_gate.recording.tape_parser import parse_tape
 
@@ -36,6 +37,7 @@ _TSV_COLUMNS = [
     "has_tool_use",
     "status_code",
     "has_reasoning",
+    "engine",
     "slug",
     "recorded",
     "first_user_message",
@@ -234,7 +236,7 @@ class TapeIndex:
         writer.writeheader()
         for row in self._rows:
             writer.writerow(_row_to_tsv_dict(row))
-        self.index_path.write_text(buf.getvalue(), encoding="utf-8")
+        atomic_write_text(self.index_path, buf.getvalue())
 
     def __len__(self) -> int:
         return len(self._rows)
@@ -263,6 +265,7 @@ def _row_to_tsv_dict(row: IndexRow) -> dict[str, str]:
         "has_tool_use": "true" if row.has_tool_use else "false",
         "status_code": str(row.status_code),
         "has_reasoning": "true" if row.has_reasoning else "false",
+        "engine": row.engine,
         "slug": row.slug,
         "recorded": row.recorded,
         "first_user_message": row.first_user_message,
@@ -299,6 +302,7 @@ def _parse_tsv_row(raw: dict[str, str | None]) -> IndexRow:
         has_tool_use=(raw.get("has_tool_use", "") or "").lower() == "true",
         status_code=status_code,
         has_reasoning=(raw.get("has_reasoning", "") or "").lower() == "true",
+        engine=raw.get("engine", "") or "",
         slug=raw.get("slug", "") or "",
         recorded=raw.get("recorded", "") or "",
         first_user_message=raw.get("first_user_message", "") or "",

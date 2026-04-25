@@ -18,6 +18,7 @@ Directory layout:
 Key classes: `CacheStorage`, `CachedRequest`, `CachedResponse`, `CacheEntry`
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -28,6 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from inference_gate.recording.atomic_io import atomic_write_text
 from inference_gate.recording.hashing import (compute_content_hash, compute_prompt_hash, compute_prompt_model_hash, compute_response_hash,
                                               extract_first_user_message, generate_slug)
 from inference_gate.recording.models import IndexRow, ReplyInfo, SamplingParams, SectionKind, TapeMetadata, extract_sampling_params
@@ -120,6 +122,16 @@ class CacheStorage:
         # Load or create the index
         self.index = TapeIndex(self.cache_dir / "index.tsv")
 
+        # Async coordination primitives.  ``_index_lock`` serialises mutations to
+        # the in-memory index and the on-disk TSV.  ``_content_locks`` provides
+        # per-content-hash locks so concurrent identical record requests do not
+        # double-record (one wins, others append/replay).  Both are created
+        # lazily so that synchronous code paths (CLI, tools) do not require an
+        # asyncio loop.
+        self._index_lock: asyncio.Lock | None = None
+        self._content_locks: dict[str, asyncio.Lock] = {}
+        self._content_locks_lock: asyncio.Lock | None = None
+
         # Migrate any v1 tapes to v2 format (adds explicit Status: 200 and bumps tape_version).
         # Runs before any reindex so that the rebuilt index picks up the new columns.
         migrated = self._migrate_v1_tapes()
@@ -172,12 +184,18 @@ class CacheStorage:
 
         return None
 
-    def put(self, entry: CacheEntry, max_replies: int = 1) -> str:
+    def put(self, entry: CacheEntry, max_replies: int = 1, extra_metadata: dict[str, str] | None = None) -> str:
         """
         Store a new cache entry as a tape file + response files.
 
         Creates the tape with the first reply. If a tape for this request
         already exists (same content hash), appends the reply instead.
+
+        ``extra_metadata`` carries the parsed ``X-InferenceGate-Metadata-*``
+        fields (engine, engine_version, test_node_id, worker_id, recorded_by)
+        which are written into ``TapeMetadata.metadata`` for new cassettes.
+        For appended replies the value is currently ignored — first-write wins
+        for cassette-level metadata.
 
         Returns the content hash used as the cassette key.
         """
@@ -242,6 +260,7 @@ class CacheStorage:
             max_replies=max_replies,
             status_code=entry.response.status_code,
             boundary=boundary,
+            metadata=dict(extra_metadata) if extra_metadata else {},
         )
 
         # Build sections with correct boundary
@@ -266,6 +285,54 @@ class CacheStorage:
 
         self.log.info("Stored new cassette %s (model=%s, replies=1, status=%d)", content_hash, entry.model, entry.response.status_code)
         return content_hash
+
+    async def put_async(self, entry: CacheEntry, max_replies: int = 1, extra_metadata: dict[str, str] | None = None) -> str:
+        """
+        Async wrapper around :meth:`put` that serialises concurrent record-mode
+        writes via two layers of locking:
+
+        - A per-``content_hash`` :class:`asyncio.Lock` so two coroutines issuing
+          the same request collapse to one tape mutation (the second one sees
+          the cassette already exists and falls into the append-reply path or
+          replays, depending on caller behaviour).
+        - The shared index lock so the in-memory ``TapeIndex`` and on-disk TSV
+          stay consistent under concurrent appends from different cassettes.
+
+        File I/O remains synchronous (see ``recording.atomic_io``); only the
+        critical section is awaited.  Once aiofiles is adopted this wrapper is
+        the place to switch to await-able I/O.
+        """
+        content_hash = compute_content_hash(entry.request.method, entry.request.path, entry.request.body)
+        per_hash_lock = await self._get_content_lock(content_hash)
+        async with per_hash_lock:
+            index_lock = self._ensure_index_lock()
+            async with index_lock:
+                return self.put(entry, max_replies=max_replies, extra_metadata=extra_metadata)
+
+    def _ensure_index_lock(self) -> asyncio.Lock:
+        """
+        Lazily create and return the index lock bound to the running event loop.
+        """
+        if self._index_lock is None:
+            self._index_lock = asyncio.Lock()
+        return self._index_lock
+
+    async def _get_content_lock(self, content_hash: str) -> asyncio.Lock:
+        """
+        Return the per-``content_hash`` lock, creating it on first access.
+
+        Acquisition of the registry lock is itself protected so that two
+        coroutines hitting the same brand-new content_hash receive the same
+        lock object.
+        """
+        if self._content_locks_lock is None:
+            self._content_locks_lock = asyncio.Lock()
+        async with self._content_locks_lock:
+            lock = self._content_locks.get(content_hash)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._content_locks[content_hash] = lock
+            return lock
 
     def _append_reply(self, content_hash: str, entry: CacheEntry, existing_row: IndexRow) -> str:
         """
@@ -768,19 +835,19 @@ class CacheStorage:
                             data_str = line[len("data:"):].strip()
                             if data_str and data_str != "[DONE]":
                                 lines.append(data_str)
-                ndjson_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                atomic_write_text(ndjson_path, "\n".join(lines) + "\n")
             has_stream = True
 
             # Store reassembled JSON
             json_path = self.responses_dir / f"{response_hash}.json"
             if not json_path.exists() and reassembled:
-                json_path.write_text(json.dumps(reassembled, ensure_ascii=False), encoding="utf-8")
+                atomic_write_text(json_path, json.dumps(reassembled, ensure_ascii=False))
 
         elif response.body is not None:
             response_hash = compute_response_hash(response.body)
             json_path = self.responses_dir / f"{response_hash}.json"
             if not json_path.exists():
-                json_path.write_text(json.dumps(response.body, ensure_ascii=False), encoding="utf-8")
+                atomic_write_text(json_path, json.dumps(response.body, ensure_ascii=False))
         else:
             # Empty response (e.g. error with no body)
             import hashlib

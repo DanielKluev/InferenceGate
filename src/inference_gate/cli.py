@@ -235,6 +235,136 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
     asyncio.run(gate.run_forever())
 
 
+@main.command()
+@click.option("--mode", default="replay", type=click.Choice(["replay", "record"]),
+              help="Operating mode: 'replay' (cached only, default) or 'record' (cache + upstream).")
+@click.option("--host", "-h", default="127.0.0.1", help="Host to bind the server to (default: 127.0.0.1).")
+@click.option("--port", "-p", default=0, type=int, help="Port to bind to. 0 = OS-assigned ephemeral (default: 0).")
+@click.option("--cache-dir", "-c", default=None, help="Directory for cached cassettes (default: from config).")
+@click.option("--upstream", "-u", default=None, help="Upstream API base URL (record mode only; default: from config).")
+@click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="API key for upstream (record mode only).")
+@click.option("--fuzzy-model/--no-fuzzy-model", default=None, help="Enable/disable fuzzy model matching.")
+@click.option("--fuzzy-sampling", default=None, type=click.Choice(["off", "soft", "aggressive"]),
+              help="Sampling parameter fuzzy matching level.")
+@click.option("--max-non-greedy-replies", default=None, type=int, help="Max replies per non-greedy cassette before cycling.")
+@click.option("--proxy", default=None, help="HTTP proxy URL for upstream requests (record mode only).")
+@click.option("--print-url", is_flag=True, default=False,
+              help="Print 'INFERENCEGATE_URL=http://...' on a single line after the server is ready, then continue running.  "
+                   "Designed for parent processes that need to discover the OS-assigned port.")
+@click.option("--parent-pid", default=None, type=int,
+              help="If set, periodically check this PID; exit cleanly when the parent process disappears.  "
+                   "Used by pytest-xdist controllers to ensure the subprocess Gate dies with the test session.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Enable verbose logging.")
+@click.pass_context
+def serve(ctx: click.Context, mode: str, host: str, port: int, cache_dir: str | None, upstream: str | None, api_key: str | None,
+          fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None, proxy: str | None,
+          print_url: bool, parent_pid: int | None, verbose: bool) -> None:
+    """
+    Start a long-running InferenceGate server suitable for use as a subprocess.
+
+    Designed for parent-process orchestration (notably the pytest plugin's
+    xdist-aware mode).  Differs from ``start`` / ``replay`` in three ways:
+
+    1. ``--print-url`` emits a single ``INFERENCEGATE_URL=...`` line after the
+       server is listening so the parent can read the OS-assigned port.
+    2. ``--parent-pid`` enables a watchdog that exits the server when the
+       parent process is gone, avoiding orphaned servers in CI.
+    3. ``--mode`` is a single flag so the same command line covers replay
+       and record sessions.
+
+    All other options behave like ``start`` / ``replay``.
+    """
+    setup_logging(verbose)
+
+    config = get_config(ctx)
+    actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
+    actual_fuzzy_model = fuzzy_model if fuzzy_model is not None else config.fuzzy_model
+    actual_fuzzy_sampling = fuzzy_sampling if fuzzy_sampling is not None else config.fuzzy_sampling
+    actual_max_replies = max_non_greedy_replies if max_non_greedy_replies is not None else config.max_non_greedy_replies
+    actual_upstream = upstream if upstream is not None else config.upstream
+    actual_api_key = api_key if api_key is not None else config.api_key
+    actual_timeout = config.upstream_timeout
+    actual_proxy = proxy if proxy is not None else config.proxy
+
+    # model_routes from config flow through transparently.
+    actual_model_routes = _parse_model_routes(config.model_routes, default_api_key=actual_api_key, default_timeout=actual_timeout,
+                                              default_proxy=actual_proxy) if config.model_routes else None
+
+    gate_mode = Mode.RECORD_AND_REPLAY if mode == "record" else Mode.REPLAY_ONLY
+
+    gate = InferenceGate(host=host, port=port, mode=gate_mode, cache_dir=actual_cache_dir, upstream_base_url=actual_upstream,
+                         api_key=actual_api_key, fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling,
+                         max_non_greedy_replies=actual_max_replies, upstream_timeout=actual_timeout, proxy=actual_proxy,
+                         model_routes=actual_model_routes)
+
+    asyncio.run(_run_serve(gate, print_url=print_url, parent_pid=parent_pid))
+
+
+async def _run_serve(gate: InferenceGate, print_url: bool, parent_pid: int | None) -> None:
+    """
+    Async driver for ``serve``: starts the gate, prints the URL, polls parent.
+
+    Splits ``InferenceGate.run_forever`` into start + custom wait loop so we
+    can announce the OS-assigned port and watch the parent PID.
+    """
+    import os
+    import sys
+
+    await gate.start()
+    if print_url:
+        # Single-line, machine-parseable announcement on stdout.
+        sys.stdout.write(f"INFERENCEGATE_URL={gate.base_url}\n")
+        sys.stdout.flush()
+
+    try:
+        while True:
+            if parent_pid is not None and not _process_alive(parent_pid):
+                # Parent died; exit cleanly so the subprocess does not orphan.
+                break
+            await asyncio.sleep(1.0 if parent_pid is not None else 3600)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        await gate.stop()
+    # Suppress the ``os`` import warning when not used in record mode.
+    _ = os
+
+
+def _process_alive(pid: int) -> bool:
+    """
+    Return True if the process with ``pid`` is alive.
+
+    Cross-platform: uses ``os.kill(pid, 0)`` on POSIX and ``OpenProcess`` on
+    Windows.  Safe to call frequently — does not raise on missing process.
+    """
+    import os
+    if os.name == "nt":
+        # On Windows os.kill(pid, 0) raises OSError for any condition; use ctypes for a definitive check.
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong()
+        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        kernel32.CloseHandle(handle)
+        if not ok:
+            return False
+        # 259 == STILL_ACTIVE
+        return exit_code.value == 259
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # PID exists but we lack signal rights — process is still alive.
+        return True
+    except OSError:
+        return False
+
+
 @main.group()
 @click.pass_context
 def cassette(ctx: click.Context) -> None:

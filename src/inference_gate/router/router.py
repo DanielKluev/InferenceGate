@@ -13,6 +13,8 @@ import logging
 import random
 from typing import Any
 
+from inference_gate.headers import (HeaderValidationError, ParsedHeaders, parse_headers, required_engine_matches,
+                                     strip_inferencegate_headers)
 from inference_gate.modes import Mode
 from inference_gate.outflow.client import OutflowClient
 from inference_gate.outflow.model_router import OutflowRouter
@@ -123,25 +125,73 @@ class Router:
         Builds a `CachedRequest`, performs tiered cache lookup, and either
         replays or forwards to upstream depending on the mode.
 
+        Parses and strips `X-InferenceGate-*` contract headers (and the legacy
+        `X-Gate-Reply-Strategy` alias) before any further processing so they
+        never enter cache-hash computations or upstream traffic.  Unknown
+        contract headers raise `HeaderValidationError` which the inflow server
+        translates into a 400 response.
+
         Returns a `CachedResponse` with the response data.
         """
-        # Build cache request for lookup
-        cached_request = self._build_cached_request(method, path, headers, body, query_params)
+        # Parse contract headers first so a malformed header surfaces as 400 before any work.
+        parsed = parse_headers(headers)
+        # Strip contract headers from the dict that flows into hashing / upstream.
+        clean_headers = strip_inferencegate_headers(headers)
 
-        # Extract replay strategy from header (default: round-robin)
-        strategy = "round-robin"
-        strategy_header = headers.get("X-Gate-Reply-Strategy", headers.get("x-gate-reply-strategy", ""))
-        if strategy_header in ("round-robin", "random", "first"):
-            strategy = strategy_header
+        # Resolve per-request overrides for mode, fuzzy_model, fuzzy_sampling, reply strategy.
+        effective_mode = self._resolve_mode(parsed)
+        effective_fuzzy_model = self._resolve_fuzzy_model(parsed)
+        effective_fuzzy_sampling = self._resolve_fuzzy_sampling(parsed)
+        strategy = parsed.control.get("reply_strategy", "round-robin")
+        if strategy not in ("round-robin", "random", "first"):
+            strategy = "round-robin"
 
-        # Tiered cache lookup
-        index_row = self._tiered_lookup(method, path, body)
+        # Build cache request for lookup using the cleaned header set.
+        cached_request = self._build_cached_request(method, path, clean_headers, body, query_params)
 
-        if self.mode == Mode.REPLAY_ONLY:
+        # Tiered cache lookup with per-request fuzzy overrides + Require-* engine filters.
+        index_row = self._tiered_lookup(method, path, body, fuzzy_model=effective_fuzzy_model,
+                                        fuzzy_sampling=effective_fuzzy_sampling, parsed=parsed)
+
+        if effective_mode == Mode.REPLAY_ONLY:
             return self._handle_replay_only(index_row, cached_request, strategy)
 
         # RECORD_AND_REPLAY mode
-        return await self._handle_record_and_replay(index_row, cached_request, strategy)
+        return await self._handle_record_and_replay(index_row, cached_request, strategy, parsed=parsed)
+
+    def _resolve_mode(self, parsed: ParsedHeaders) -> Mode:
+        """
+        Resolve effective mode for this request, honouring `Control-Mode` override.
+
+        Falls back to the router's session-default mode when no override is set.
+        """
+        override = parsed.control.get("mode")
+        if override is None:
+            return self.mode
+        if override == "replay":
+            return Mode.REPLAY_ONLY
+        if override == "record":
+            return Mode.RECORD_AND_REPLAY
+        # ``passthrough`` is reserved; treated as record-and-replay for now.
+        return Mode.RECORD_AND_REPLAY
+
+    def _resolve_fuzzy_model(self, parsed: ParsedHeaders) -> bool:
+        """
+        Resolve effective `fuzzy_model` for this request.
+        """
+        value = parsed.require.get("fuzzy_model")
+        if value is None:
+            return self.fuzzy_model
+        return value.lower() == "on"
+
+    def _resolve_fuzzy_sampling(self, parsed: ParsedHeaders) -> str:
+        """
+        Resolve effective `fuzzy_sampling` for this request.
+        """
+        value = parsed.require.get("fuzzy_sampling")
+        if value is None:
+            return self.fuzzy_sampling
+        return value.lower()
 
     def _build_cached_request(self, method: str, path: str, headers: dict[str, str], body: dict[str, Any] | None,
                               query_params: dict[str, str] | None) -> CachedRequest:
@@ -159,35 +209,48 @@ class Router:
 
         return CachedRequest(method=method, path=path, headers=relevant_headers, body=body, query_params=query_params)
 
-    def _tiered_lookup(self, method: str, path: str, body: dict[str, Any] | None) -> IndexRow | None:
+    def _tiered_lookup(self, method: str, path: str, body: dict[str, Any] | None, fuzzy_model: bool | None = None,
+                       fuzzy_sampling: str | None = None, parsed: ParsedHeaders | None = None) -> IndexRow | None:
         """
         Perform tiered cache lookup: exact → sampling fuzzy → model fuzzy.
 
+        ``fuzzy_model`` and ``fuzzy_sampling`` are per-request overrides; when
+        ``None`` the router defaults are used.  ``parsed`` carries the parsed
+        contract headers; when present, ``Require-Engine`` and
+        ``Require-Engine-Version`` filter candidate cassettes via
+        :func:`required_engine_matches` against the row's denormalised
+        ``engine`` column (and tape metadata for finer matches).
+
         Returns the matching `IndexRow` or None.
         """
+        effective_fuzzy_model = self.fuzzy_model if fuzzy_model is None else fuzzy_model
+        effective_fuzzy_sampling = self.fuzzy_sampling if fuzzy_sampling is None else fuzzy_sampling
+
         # Tier 1: Exact match (content_hash)
         content_hash = compute_content_hash(method, path, body)
         row = self.storage.index.by_content_hash.get(content_hash)
-        if row is not None:
+        if row is not None and self._row_satisfies_requires(row, parsed):
             self.log.debug("Exact match: content_hash=%s", content_hash)
             return row
 
         # Tier 2: Sampling fuzzy (prompt_model_hash) — if enabled
-        if self.fuzzy_sampling != "off":
+        if effective_fuzzy_sampling != "off":
             pm_hash = compute_prompt_model_hash(method, path, body)
             candidates = self.storage.index.by_prompt_model_hash.get(pm_hash, [])
-            row = self._filter_sampling_candidates(candidates, body)
+            candidates = [c for c in candidates if self._row_satisfies_requires(c, parsed)]
+            row = self._filter_sampling_candidates(candidates, body, effective_fuzzy_sampling)
             if row is not None:
                 self.log.info("Sampling fuzzy match: prompt_model_hash=%s, cached_model=%s", pm_hash, row.model)
                 return row
 
         # Tier 3: Model fuzzy (prompt_hash) — if enabled
-        if self.fuzzy_model:
+        if effective_fuzzy_model:
             p_hash = compute_prompt_hash(body)
             candidates = self.storage.index.by_prompt_hash.get(p_hash, [])
+            candidates = [c for c in candidates if self._row_satisfies_requires(c, parsed)]
             # Apply sampling filter here too if fuzzy_sampling is active
-            if self.fuzzy_sampling != "off":
-                row = self._filter_sampling_candidates(candidates, body)
+            if effective_fuzzy_sampling != "off":
+                row = self._filter_sampling_candidates(candidates, body, effective_fuzzy_sampling)
             elif candidates:
                 row = self._pick_best_candidate(candidates)
             else:
@@ -198,23 +261,53 @@ class Router:
 
         return None
 
-    def _filter_sampling_candidates(self, candidates: list[IndexRow], body: dict[str, Any] | None) -> IndexRow | None:
+    def _row_satisfies_requires(self, row: IndexRow, parsed: ParsedHeaders | None) -> bool:
+        """
+        Apply ``Require-Engine`` / ``Require-Engine-Version`` filter to a candidate row.
+
+        Engine name is denormalised onto the index row for fast filtering.  Engine
+        version is not denormalised; when a version constraint is set we conservatively
+        load the tape metadata to evaluate it.  When no constraints are set this is a no-op.
+        """
+        if parsed is None:
+            return True
+        require_engine = parsed.require.get("engine")
+        require_engine_version = parsed.require.get("engine_version")
+        if not require_engine and not require_engine_version:
+            return True
+        candidate_meta: dict[str, str] = {}
+        if row.engine:
+            candidate_meta["engine"] = row.engine
+        if require_engine_version:
+            # Need full tape metadata to evaluate version constraint.
+            loaded = self.storage.load_tape(row.content_hash)
+            if loaded is not None:
+                tape_meta, _ = loaded
+                candidate_meta = dict(tape_meta.metadata)
+        return required_engine_matches(parsed, candidate_meta)
+
+    def _filter_sampling_candidates(self, candidates: list[IndexRow], body: dict[str, Any] | None,
+                                    fuzzy_sampling: str | None = None) -> IndexRow | None:
         """
         Filter and pick from sampling-fuzzy candidates based on the fuzzy_sampling level.
 
         `soft`: only non-greedy cassettes matched against non-greedy request (non-greedy ↔ non-greedy).
         `aggressive`: any cassette matches (greedy ↔ non-greedy allowed).
+
+        ``fuzzy_sampling`` is a per-request override; when ``None`` the router default is used.
         """
         if not candidates:
             return None
 
-        if self.fuzzy_sampling == "soft":
+        level = self.fuzzy_sampling if fuzzy_sampling is None else fuzzy_sampling
+
+        if level == "soft":
             # Soft: only match non-greedy with non-greedy
             request_is_greedy = is_greedy(body)
             filtered = [r for r in candidates if r.is_greedy == request_is_greedy]
             return self._pick_best_candidate(filtered)
 
-        if self.fuzzy_sampling == "aggressive":
+        if level == "aggressive":
             # Aggressive: any match is fine
             return self._pick_best_candidate(candidates)
 
@@ -258,15 +351,20 @@ class Router:
             is_streaming=False,
         )
 
-    async def _handle_record_and_replay(self, index_row: IndexRow | None, cached_request: CachedRequest, strategy: str) -> CachedResponse:
+    async def _handle_record_and_replay(self, index_row: IndexRow | None, cached_request: CachedRequest, strategy: str,
+                                        parsed: ParsedHeaders | None = None) -> CachedResponse:
         """
         Handle request in RECORD_AND_REPLAY mode.
 
         For greedy requests: cache hit → replay immediately; cache miss → forward and store.
         For non-greedy requests: cache hit with replies < max → forward and append;
         cache hit with replies >= max → cycle through stored replies.
+
+        ``parsed`` carries the parsed contract headers; ``Metadata-*`` fields are
+        forwarded to storage for new cassettes.
         """
         request_is_greedy = is_greedy(cached_request.body)
+        extra_metadata = parsed.metadata if parsed is not None else {}
 
         if index_row is not None:
             # Determine max replies for this cassette
@@ -276,7 +374,7 @@ class Router:
                 # Non-greedy cassette not full yet — record another reply
                 self.log.info("Non-greedy cassette %s has %d/%d replies — recording another", index_row.content_hash, index_row.replies,
                               max_replies)
-                return await self._forward_and_append(cached_request, index_row)
+                return await self._forward_and_append(cached_request, index_row, extra_metadata=extra_metadata)
 
             # Cassette full or greedy — replay
             self.log.info("Cache hit - replaying response for %s %s (replies=%d)", cached_request.method, cached_request.path,
@@ -286,11 +384,15 @@ class Router:
         # Cache miss - forward to upstream and create new cassette
         assert self.outflow is not None
         self.log.info("Cache miss - forwarding to upstream for %s %s", cached_request.method, cached_request.path)
-        return await self._forward_and_store(cached_request, request_is_greedy)
+        return await self._forward_and_store(cached_request, request_is_greedy, extra_metadata=extra_metadata)
 
-    async def _forward_and_store(self, cached_request: CachedRequest, request_is_greedy: bool) -> CachedResponse:
+    async def _forward_and_store(self, cached_request: CachedRequest, request_is_greedy: bool,
+                                 extra_metadata: dict[str, str] | None = None) -> CachedResponse:
         """
         Forward a request to upstream, store the response as a new cassette, and return the response.
+
+        ``extra_metadata`` carries parsed ``X-InferenceGate-Metadata-*`` fields and is
+        passed to :meth:`CacheStorage.put_async`, which records them into the new tape.
         """
         assert self.outflow is not None
 
@@ -320,14 +422,19 @@ class Router:
             prompt_hash=p_hash,
             original_client_streaming=original_client_streaming,
         )
-        content_hash = self.storage.put(entry, max_replies=max_replies)
+        content_hash = await self.storage.put_async(entry, max_replies=max_replies, extra_metadata=extra_metadata)
         self.log.info("Recorded response with content hash %s", content_hash)
 
         return response
 
-    async def _forward_and_append(self, cached_request: CachedRequest, index_row: IndexRow) -> CachedResponse:
+    async def _forward_and_append(self, cached_request: CachedRequest, index_row: IndexRow,
+                                  extra_metadata: dict[str, str] | None = None) -> CachedResponse:
         """
         Forward a request to upstream and append the response to an existing cassette.
+
+        ``extra_metadata`` is forwarded for symmetry; the underlying storage layer keeps
+        first-write-wins semantics for cassette-level metadata (appended replies do not
+        overwrite the existing ``TapeMetadata.metadata`` mapping).
         """
         assert self.outflow is not None
 
@@ -354,7 +461,7 @@ class Router:
             prompt_hash=p_hash,
             original_client_streaming=original_client_streaming,
         )
-        self.storage.put(entry, max_replies=index_row.max_replies)
+        await self.storage.put_async(entry, max_replies=index_row.max_replies, extra_metadata=extra_metadata)
         self.log.info("Appended reply to cassette %s", index_row.content_hash)
 
         return response

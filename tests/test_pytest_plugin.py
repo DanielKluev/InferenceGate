@@ -460,24 +460,25 @@ class TestStrictMatchingMarker:
 
     def test_strict_marker_forces_exact_matching(self, pytester):
         """
-        @pytest.mark.inferencegate_strict must flip router.fuzzy_model to False
-        and router.fuzzy_sampling to "off" during the test, regardless of
-        session defaults enabling fuzzy matching.
+        @pytest.mark.inferencegate_strict must push
+        ``X-InferenceGate-Require-Exact: true`` onto Glue's request-context
+        ContextVar for the duration of the test so per-request lookup
+        forces exact matching, regardless of session-level fuzzy defaults.
         """
         pytester.makepyfile("""
             import pytest
+            from inference_glue.request_context import current_headers
 
             @pytest.mark.inferencegate_strict
             def test_strict(inference_gate):
-                router = inference_gate.router
-                assert router is not None
-                assert router.fuzzy_model is False
-                assert router.fuzzy_sampling == "off"
+                hdrs = current_headers()
+                assert hdrs.get("X-InferenceGate-Require-Exact") == "true"
 
             def test_unmarked(inference_gate):
-                # Session default (fuzzy_model=true here) must be preserved.
-                router = inference_gate.router
-                assert router.fuzzy_model is True
+                # Unmarked test: only auto Test-NodeID/Worker-ID metadata, no Require-* headers.
+                hdrs = current_headers()
+                assert "X-InferenceGate-Require-Exact" not in hdrs
+                assert "X-InferenceGate-Require-Fuzzy-Model" not in hdrs
         """)
         pytester.makeini(f"""
             [pytest]
@@ -490,18 +491,20 @@ class TestStrictMatchingMarker:
 
     def test_custom_marker_overrides_individual_flags(self, pytester):
         """
-        @pytest.mark.inferencegate(fuzzy_model=False) must flip only the
-        specified flag and leave others at session default.
+        @pytest.mark.inferencegate(fuzzy_model=False) must push only
+        ``X-InferenceGate-Require-Fuzzy-Model: off`` and leave fuzzy_sampling
+        unset (so the Gate falls back to its session default).
         """
         pytester.makepyfile("""
             import pytest
+            from inference_glue.request_context import current_headers
 
             @pytest.mark.inferencegate(fuzzy_model=False)
             def test_only_model_off(inference_gate):
-                router = inference_gate.router
-                assert router.fuzzy_model is False
-                # fuzzy_sampling not overridden — session default preserved
-                assert router.fuzzy_sampling == "aggressive"
+                hdrs = current_headers()
+                assert hdrs.get("X-InferenceGate-Require-Fuzzy-Model") == "off"
+                # fuzzy_sampling not overridden \u2014 no header pushed.
+                assert "X-InferenceGate-Require-Fuzzy-Sampling" not in hdrs
         """)
         pytester.makeini(f"""
             [pytest]
@@ -514,19 +517,20 @@ class TestStrictMatchingMarker:
 
     def test_overrides_are_restored_after_test(self, pytester):
         """
-        Router flags must be restored to session defaults after a marked test
-        finishes, so subsequent unmarked tests see the original configuration.
+        Header overrides must be popped from the ContextVar after a marked test
+        finishes, so subsequent unmarked tests do not see leaked Require-* headers.
         """
         pytester.makepyfile("""
             import pytest
+            from inference_glue.request_context import current_headers
 
             @pytest.mark.inferencegate_strict
             def test_first_strict(inference_gate):
-                assert inference_gate.router.fuzzy_model is False
+                assert current_headers().get("X-InferenceGate-Require-Exact") == "true"
 
             def test_second_unmarked(inference_gate):
-                # If restore worked, session default (true) is back.
-                assert inference_gate.router.fuzzy_model is True
+                # If restore worked, the strict header is gone.
+                assert "X-InferenceGate-Require-Exact" not in current_headers()
         """)
         pytester.makeini(f"""
             [pytest]
@@ -535,6 +539,35 @@ class TestStrictMatchingMarker:
         """)
         result = pytester.runpytest("-v")
         result.assert_outcomes(passed=2)
+
+
+class TestAutoTestIdentityMetadata:
+    """Auto-attached ``Metadata-Test-NodeID`` / ``Metadata-Worker-ID`` headers."""
+
+    def test_node_id_and_worker_id_pushed_for_every_test(self, pytester):
+        """
+        Every test (marked or not) should get its pytest nodeid and the
+        xdist worker name (``"master"`` outside xdist) pushed onto Glue's
+        request-context ContextVar.
+        """
+        pytester.makepyfile("""
+            from inference_glue.request_context import current_headers
+
+            def test_metadata_pushed(inference_gate):
+                hdrs = current_headers()
+                node_id = hdrs.get("X-InferenceGate-Metadata-Test-NodeID")
+                assert node_id is not None
+                # Pytester wraps tests in its own module; nodeid contains the test name.
+                assert "test_metadata_pushed" in node_id
+                # Outside xdist, worker is "master".
+                assert hdrs.get("X-InferenceGate-Metadata-Worker-ID") == "master"
+        """)
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+        """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=1)
 
 
 class TestPluginDisabling:

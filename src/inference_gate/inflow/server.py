@@ -14,6 +14,8 @@ from typing import Any
 
 from aiohttp import web
 
+from inference_gate.headers import HeaderValidationError
+from inference_gate.inflow.admin import register_admin_routes
 from inference_gate.recording.reassembly import reassemble_streaming_response
 from inference_gate.recording.storage import CachedResponse
 from inference_gate.router.router import Router
@@ -47,11 +49,19 @@ class InflowServer:
         """
         Create the aiohttp web application with route handlers.
 
+        Registers the reserved ``/gate/*`` admin namespace before the proxy
+        catch-all so admin endpoints take precedence and never get routed
+        upstream.  ``/health`` is preserved as a legacy alias of
+        ``/gate/health`` for backward compatibility with existing probes.
+
         Returns the configured `web.Application`.
         """
         app = web.Application()
+        # Admin namespace first (also stashes router under app['router']).
+        register_admin_routes(app, self.router)
+        # Legacy health alias.
         app.router.add_route("GET", "/health", self._handle_health)
-        # Catch-all route for proxying API requests
+        # Catch-all route for proxying API requests.
         app.router.add_route("*", "/{path:.*}", self._handle_proxy)
         return app
 
@@ -135,7 +145,22 @@ class InflowServer:
 
         # Route the request
         self.log.debug("Received %s %s (client_streaming=%s)", method, path, client_wants_streaming)
-        cached_response = await self.router.route_request(method=method, path=path, headers=headers, body=body, query_params=query_params)
+        try:
+            cached_response = await self.router.route_request(method=method, path=path, headers=headers, body=body,
+                                                              query_params=query_params)
+        except HeaderValidationError as exc:
+            # Malformed contract header — surface to the client as a structured 400 so SDKs can react.
+            self.log.warning("Rejected request %s %s: invalid header %s", method, path, exc.offending_header)
+            return web.json_response(
+                status=400,
+                data={
+                    "error": {
+                        "message": exc.message,
+                        "type": "invalid_header",
+                        "param": exc.offending_header,
+                    }
+                },
+            )
 
         # Build and return the response, adapting to client's streaming preference
         return self._build_response(cached_response, client_wants_streaming, path)

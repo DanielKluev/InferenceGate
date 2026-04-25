@@ -168,6 +168,11 @@ class TapeMetadata(BaseModel):
     # a multi-reply tape contains mixed outcomes.
     status_code: int = 200
     boundary: str = ""
+    # Free-form metadata captured from `X-InferenceGate-Metadata-*` headers at
+    # record time.  Known well-typed keys: ``engine``, ``engine_version``,
+    # ``test_node_id``, ``worker_id``, ``recorded_by``.  Empty when the recording
+    # client did not send any metadata headers.  Never participates in any cache hash.
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class IndexRow(BaseModel):
@@ -195,6 +200,9 @@ class IndexRow(BaseModel):
     status_code: int = 200
     # True when any reply in the cassette has non-empty reasoning/CoT content.
     has_reasoning: bool = False
+    # Engine identifier (from TapeMetadata.metadata['engine']) hoisted into the index for
+    # fast `Require-Engine` filtering. Empty string when not recorded.
+    engine: str = ""
     slug: str = ""
     recorded: str = ""
     first_user_message: str = ""
@@ -229,6 +237,7 @@ class IndexRow(BaseModel):
             has_tool_use=bool(meta.tools),
             status_code=meta.status_code,
             has_reasoning=has_reasoning,
+            engine=meta.metadata.get("engine", ""),
             slug=slug,
             recorded=meta.recorded.isoformat() if meta.recorded else "",
             first_user_message=first_user_message,
