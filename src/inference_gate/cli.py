@@ -25,6 +25,7 @@ from inference_gate.config import Config, ConfigManager
 from inference_gate.inference_gate import InferenceGate
 from inference_gate.modes import Mode
 from inference_gate.outflow.client import OutflowClient
+from inference_gate.outflow.model_router import UpstreamConfig
 from inference_gate.recording.hashing import compute_response_hash
 from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
@@ -54,6 +55,23 @@ def load_config(ctx: click.Context, config_path: str | None) -> Config:
     ctx.obj["config"] = config
     ctx.obj["config_manager"] = manager
     return config
+
+
+def _parse_model_routes(raw_routes: dict[str, dict[str, Any]], default_api_key: str | None = None, default_timeout: float = 120.0,
+                        default_proxy: str | None = None) -> dict[str, UpstreamConfig]:
+    """
+    Convert raw YAML model_routes dicts into ``UpstreamConfig`` objects.
+
+    Each entry in ``raw_routes`` maps a model name or glob pattern to a dict
+    with at least ``upstream`` (the URL).  Optional keys: ``api_key``,
+    ``timeout``, ``proxy``.  Missing optional keys fall back to the
+    provided defaults.
+    """
+    result: dict[str, UpstreamConfig] = {}
+    for pattern, cfg in raw_routes.items():
+        result[pattern] = UpstreamConfig(url=cfg["upstream"], api_key=cfg.get("api_key", default_api_key),
+                                         timeout=cfg.get("timeout", default_timeout), proxy=cfg.get("proxy", default_proxy))
+    return result
 
 
 def get_config(ctx: click.Context) -> Config:
@@ -133,12 +151,16 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     actual_timeout = upstream_timeout if upstream_timeout is not None else config.upstream_timeout
     actual_proxy = proxy if proxy is not None else config.proxy
 
+    # Convert model_routes from raw YAML dicts to UpstreamConfig objects
+    actual_model_routes = _parse_model_routes(config.model_routes, default_api_key=actual_api_key, default_timeout=actual_timeout,
+                                              default_proxy=actual_proxy) if config.model_routes else None
+
     setup_logging(actual_verbose)
 
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.RECORD_AND_REPLAY, cache_dir=actual_cache_dir,
                          upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port,
                          fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling, max_non_greedy_replies=actual_max_replies,
-                         upstream_timeout=actual_timeout, proxy=actual_proxy)
+                         upstream_timeout=actual_timeout, proxy=actual_proxy, model_routes=actual_model_routes)
 
     click.echo("Starting InferenceGate in record-and-replay mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")

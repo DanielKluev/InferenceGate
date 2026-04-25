@@ -89,8 +89,12 @@ def compute_prompt_hash(body: dict[str, Any] | None) -> str:
     """
     Compute the model-fuzzy hash from messages only.
 
-    For Chat Completions API: hashes the `messages` field.
-    For Responses API: hashes the `input` field.
+    For Chat Completions API: hashes the ``messages`` field.
+    For Responses API: hashes the ``input`` field.
+    For raw Completions API (``/v1/completions``, ``/completion``): hashes
+    the ``prompt`` field as a raw string.  Raw prompts are hashed directly
+    (not wrapped in a messages structure) so they never cross-match with
+    messages-based requests at tier 3.
 
     Returns a 16-character hex string.
     """
@@ -99,7 +103,15 @@ def compute_prompt_hash(body: dict[str, Any] | None) -> str:
 
     # Chat Completions API uses "messages", Responses API uses "input"
     messages = body.get("messages") or body.get("input")
-    return _hash_data(messages, _PROMPT_HASH_LEN)
+    if messages is not None:
+        return _hash_data(messages, _PROMPT_HASH_LEN)
+
+    # Raw Completions API uses "prompt" (pre-formatted string from chat template)
+    prompt = body.get("prompt")
+    if prompt is not None:
+        return _hash_data(prompt, _PROMPT_HASH_LEN)
+
+    return _hash_data(None, _PROMPT_HASH_LEN)
 
 
 def compute_response_hash(response_body: dict[str, Any]) -> str:
@@ -151,34 +163,11 @@ def generate_slug(body: dict[str, Any] | None, max_length: int = 40) -> str:
     lowercased, non-alphanumeric characters replaced with hyphens,
     consecutive hyphens collapsed, leading/trailing hyphens stripped.
 
+    Falls back to the raw ``prompt`` field for Completions API requests.
+
     Returns an empty string if no user message is found.
     """
-    if not body:
-        return ""
-
-    messages = body.get("messages") or body.get("input")
-    if not messages or not isinstance(messages, list):
-        return ""
-
-    # Find the first user message
-    first_user_text = ""
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                first_user_text = content
-            elif isinstance(content, list):
-                # Multimodal message: extract text from content parts
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        first_user_text = part.get("text", "")
-                        break
-            break
-        elif isinstance(msg, str):
-            # Responses API simple string input
-            first_user_text = msg
-            break
-
+    first_user_text = _extract_prompt_text(body)
     if not first_user_text:
         return ""
 
@@ -193,35 +182,52 @@ def extract_first_user_message(body: dict[str, Any] | None, max_length: int = 12
     """
     Extract the first user message text for the index TSV.
 
-    Returns up to `max_length` characters with newlines and tabs replaced by spaces.
+    Returns up to ``max_length`` characters with newlines and tabs replaced
+    by spaces.  Falls back to the raw ``prompt`` field for Completions API
+    requests.
     """
-    if not body:
-        return ""
-
-    messages = body.get("messages") or body.get("input")
-    if not messages or not isinstance(messages, list):
-        return ""
-
-    first_user_text = ""
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                first_user_text = content
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        first_user_text = part.get("text", "")
-                        break
-            break
-        elif isinstance(msg, str):
-            first_user_text = msg
-            break
-
+    first_user_text = _extract_prompt_text(body)
     # Sanitize for TSV: replace newlines and tabs with spaces
     text = first_user_text[:max_length]
     text = text.replace("\n", " ").replace("\r", " ").replace("\t", " ")
     return text
+
+
+def _extract_prompt_text(body: dict[str, Any] | None) -> str:
+    """
+    Extract the first user-facing text from a request body.
+
+    Checks ``messages`` (Chat Completions), ``input`` (Responses API),
+    and ``prompt`` (raw Completions) in that order.
+
+    Returns the raw text string or empty string if nothing is found.
+    """
+    if not body:
+        return ""
+
+    # Chat Completions API / Responses API
+    messages = body.get("messages") or body.get("input")
+    if messages and isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            return part.get("text", "")
+                return ""
+            if isinstance(msg, str):
+                # Responses API simple string input
+                return msg
+
+    # Raw Completions API (pre-formatted prompt string)
+    prompt = body.get("prompt")
+    if prompt and isinstance(prompt, str):
+        return prompt
+
+    return ""
 
 
 def _filter_body(body: dict[str, Any] | None, exclude: frozenset[str]) -> dict[str, Any] | None:

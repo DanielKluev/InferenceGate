@@ -15,6 +15,7 @@ from typing import Any
 
 from inference_gate.modes import Mode
 from inference_gate.outflow.client import OutflowClient
+from inference_gate.outflow.model_router import OutflowRouter
 from inference_gate.recording.hashing import compute_content_hash, compute_prompt_hash, compute_prompt_model_hash, is_greedy
 from inference_gate.recording.models import IndexRow
 from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
@@ -85,7 +86,7 @@ class Router:
     In `REPLAY_ONLY` mode, only returns cached responses.
     """
 
-    def __init__(self, mode: Mode, storage: CacheStorage, outflow: OutflowClient | None = None,
+    def __init__(self, mode: Mode, storage: CacheStorage, outflow: OutflowClient | OutflowRouter | None = None,
                  non_streaming_models: list[str] | None = None, fuzzy_model: bool = False, fuzzy_sampling: str = "off",
                  max_non_greedy_replies: int = 5) -> None:
         """
@@ -94,6 +95,8 @@ class Router:
         `mode` determines the routing behavior.
         `storage` is the cache storage for recorded inferences.
         `outflow` is the client for forwarding to upstream (required for RECORD_AND_REPLAY mode).
+            Accepts either a single ``OutflowClient`` or an ``OutflowRouter`` for
+            model-based multi-upstream routing.
         `non_streaming_models` is a list of model names that do not support streaming.
         `fuzzy_model` enables fallback to cache entries with the same prompt but a different model.
         `fuzzy_sampling` controls sampling parameter fuzzy matching: "off", "soft", or "aggressive".
@@ -255,8 +258,7 @@ class Router:
             is_streaming=False,
         )
 
-    async def _handle_record_and_replay(self, index_row: IndexRow | None, cached_request: CachedRequest,
-                                        strategy: str) -> CachedResponse:
+    async def _handle_record_and_replay(self, index_row: IndexRow | None, cached_request: CachedRequest, strategy: str) -> CachedResponse:
         """
         Handle request in RECORD_AND_REPLAY mode.
 
@@ -272,8 +274,8 @@ class Router:
 
             if not request_is_greedy and index_row.replies < max_replies:
                 # Non-greedy cassette not full yet — record another reply
-                self.log.info("Non-greedy cassette %s has %d/%d replies — recording another",
-                              index_row.content_hash, index_row.replies, max_replies)
+                self.log.info("Non-greedy cassette %s has %d/%d replies — recording another", index_row.content_hash, index_row.replies,
+                              max_replies)
                 return await self._forward_and_append(cached_request, index_row)
 
             # Cassette full or greedy — replay
@@ -363,32 +365,39 @@ class Router:
         """
         reply_num = self.replay_counter.next_reply(index_row.content_hash, index_row.replies, strategy)
 
-        # Get the response hash for this reply
-        response_hashes = self.storage.get_reply_response_hashes(index_row.content_hash)
-        if not response_hashes:
+        # Get the (response_hash, status_code) tuples for this cassette so that
+        # recorded error statuses (4xx/5xx) replay with their original HTTP code.
+        reply_meta = self.storage.get_reply_metadata(index_row.content_hash)
+        if not reply_meta:
             self.log.error("No response hashes found for cassette %s", index_row.content_hash)
             return CachedResponse(
                 status_code=500,
                 headers={"Content-Type": "application/json"},
-                body={"error": {"message": "Internal error: cassette has no replies", "type": "internal_error"}},
+                body={"error": {
+                    "message": "Internal error: cassette has no replies",
+                    "type": "internal_error"
+                }},
                 is_streaming=False,
             )
 
         # Clamp reply_num to available replies
-        reply_idx = min(reply_num, len(response_hashes)) - 1
-        response_hash = response_hashes[reply_idx]
+        reply_idx = min(reply_num, len(reply_meta)) - 1
+        response_hash, status_code = reply_meta[reply_idx]
 
         # Load response (try streaming first, fall back to non-streaming)
-        cached_response = self.storage.load_response(response_hash, streaming=True)
+        cached_response = self.storage.load_response(response_hash, streaming=True, status_code=status_code)
         if cached_response is None:
-            cached_response = self.storage.load_response(response_hash, streaming=False)
+            cached_response = self.storage.load_response(response_hash, streaming=False, status_code=status_code)
 
         if cached_response is None:
             self.log.error("Response %s not found for cassette %s reply %d", response_hash, index_row.content_hash, reply_num)
             return CachedResponse(
                 status_code=500,
                 headers={"Content-Type": "application/json"},
-                body={"error": {"message": "Internal error: response file missing", "type": "internal_error"}},
+                body={"error": {
+                    "message": "Internal error: response file missing",
+                    "type": "internal_error"
+                }},
                 is_streaming=False,
             )
 

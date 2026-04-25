@@ -120,6 +120,17 @@ class CacheStorage:
         # Load or create the index
         self.index = TapeIndex(self.cache_dir / "index.tsv")
 
+        # Migrate any v1 tapes to v2 format (adds explicit Status: 200 and bumps tape_version).
+        # Runs before any reindex so that the rebuilt index picks up the new columns.
+        migrated = self._migrate_v1_tapes()
+
+        # Auto-rebuild if the index was written by an older schema version,
+        # or if tapes were just migrated (columns may be stale).
+        if self.index._needs_rebuild or migrated > 0:
+            self.log.info("Rebuilding index to match current schema (migrated=%d)", migrated)
+            self.index.rebuild(self.requests_dir)
+            self.index._needs_rebuild = False
+
     def get(self, request: CachedRequest) -> CacheEntry | None:
         """
         Look up a cached response by exact content hash.
@@ -185,7 +196,7 @@ class CacheStorage:
             return self._append_reply(content_hash, entry, existing_row)
 
         # Store response files
-        response_hash, has_stream = self._store_response(entry.response)
+        response_hash, has_stream = self._store_response(entry.response, request_path=path)
 
         # Extract metadata from request
         sampling = extract_sampling_params(body) if body else SamplingParams()
@@ -193,7 +204,7 @@ class CacheStorage:
         first_user_msg = extract_first_user_message(body)
 
         # Build reply info
-        reply_info = self._build_reply_info(1, response_hash, has_stream, entry.response)
+        reply_info = self._build_reply_info(1, response_hash, has_stream, entry.response, request_path=entry.request.path)
 
         # Build tape metadata
         tools_summary = []
@@ -203,14 +214,17 @@ class CacheStorage:
                     fname = tool.get("function", {}).get("name", "") if isinstance(tool.get("function"), dict) else ""
                     tools_summary.append(fname or tool.get("name", ""))
 
-        # Gather all text content that will appear in the tape for boundary collision check
+        # Gather all text content that will appear in the tape for boundary collision check.
+        # Include reasoning content since it is written as its own section body.
         message_sections = build_message_sections(body, "")  # boundary placeholder
         all_text = "\n".join(s.body for s in message_sections if s.body)
         all_text += "\n" + reply_info.text
+        if reply_info.reasoning:
+            all_text += "\n" + reply_info.reasoning
         boundary = generate_boundary(all_text)
 
         metadata = TapeMetadata(
-            tape_version=1,
+            tape_version=2,
             content_hash=content_hash,
             prompt_model_hash=pm_hash,
             prompt_hash=p_hash,
@@ -226,6 +240,7 @@ class CacheStorage:
             recorded=datetime.now(timezone.utc),
             replies=1,
             max_replies=max_replies,
+            status_code=entry.response.status_code,
             boundary=boundary,
         )
 
@@ -245,10 +260,11 @@ class CacheStorage:
             first_user_message=first_user_msg,
             tokens_in=str(reply_info.input_tokens or ""),
             tokens_out=str(reply_info.output_tokens or ""),
+            has_reasoning=bool(reply_info.reasoning),
         )
         self.index.add(index_row)
 
-        self.log.info("Stored new cassette %s (model=%s, replies=1)", content_hash, entry.model)
+        self.log.info("Stored new cassette %s (model=%s, replies=1, status=%d)", content_hash, entry.model, entry.response.status_code)
         return content_hash
 
     def _append_reply(self, content_hash: str, entry: CacheEntry, existing_row: IndexRow) -> str:
@@ -259,7 +275,7 @@ class CacheStorage:
         and updates the index.
         """
         # Store response files
-        response_hash, has_stream = self._store_response(entry.response)
+        response_hash, has_stream = self._store_response(entry.response, request_path=entry.request.path)
 
         # Find the tape file
         tape_path = self._find_tape_file(content_hash)
@@ -269,7 +285,7 @@ class CacheStorage:
             return self.put(entry, max_replies=existing_row.max_replies)
 
         new_reply_count = existing_row.replies + 1
-        reply_info = self._build_reply_info(new_reply_count, response_hash, has_stream, entry.response)
+        reply_info = self._build_reply_info(new_reply_count, response_hash, has_stream, entry.response, request_path=entry.request.path)
 
         # Append to tape file
         append_reply_to_tape(tape_path, reply_info, new_reply_count)
@@ -280,6 +296,7 @@ class CacheStorage:
             new_reply_count,
             tokens_in=str(reply_info.input_tokens or ""),
             tokens_out=str(reply_info.output_tokens or ""),
+            has_reasoning=bool(reply_info.reasoning),
         )
 
         self.log.info("Appended reply %d to cassette %s", new_reply_count, content_hash)
@@ -314,12 +331,15 @@ class CacheStorage:
 
         self.log.info("Updated max_replies to %d for cassette %s", new_max_replies, content_hash)
 
-    def load_response(self, response_hash: str, streaming: bool = False) -> CachedResponse | None:
+    def load_response(self, response_hash: str, streaming: bool = False, status_code: int = 200) -> CachedResponse | None:
         """
         Load a response from the `responses/` directory by hash.
 
         If `streaming` is True and a `.chunks.ndjson` file exists, loads
-        SSE chunks. Otherwise loads the `.json` response body.
+        SSE chunks. Otherwise loads the `.json` response body.  The
+        ``status_code`` argument is attached to the returned ``CachedResponse``
+        so that recorded non-200 error responses replay with their original
+        HTTP status (v1 tapes without an explicit status default to 200).
 
         Returns a `CachedResponse` or None if the file is not found.
         """
@@ -331,7 +351,7 @@ class CacheStorage:
                 sse_chunks = [f"data: {line}\n\n" for line in chunks if line.strip()]
                 sse_chunks.append("data: [DONE]\n\n")
                 return CachedResponse(
-                    status_code=200,
+                    status_code=status_code,
                     headers={"Content-Type": "text/event-stream"},
                     chunks=sse_chunks,
                     is_streaming=True,
@@ -341,7 +361,7 @@ class CacheStorage:
         if json_path.exists():
             data = json.loads(json_path.read_text(encoding="utf-8"))
             return CachedResponse(
-                status_code=200,
+                status_code=status_code,
                 headers={"Content-Type": "application/json"},
                 body=data,
                 is_streaming=False,
@@ -381,6 +401,36 @@ class CacheStorage:
                 if resp_hash:
                     hashes.append(resp_hash)
         return hashes
+
+    def get_reply_metadata(self, content_hash: str) -> list[tuple[str, int]]:
+        """
+        Get (response_hash, status_code) tuples for all replies in a cassette.
+
+        Used when the caller needs to faithfully replay the original HTTP status
+        (including 4xx/5xx errors).  Tapes predating the ``Status:`` header
+        default to 200 per backward-compatibility rules.
+
+        Returns a list of tuples ordered by reply number.
+        """
+        result = self.load_tape(content_hash)
+        if result is None:
+            return []
+
+        _, sections = result
+        meta_list: list[tuple[str, int]] = []
+        for section in sections:
+            if section.kind == SectionKind.REPLY:
+                resp = section.metadata.get("Response", "")
+                resp_hash = resp.removesuffix(".json")
+                if not resp_hash:
+                    continue
+                status_str = section.metadata.get("Status", "200")
+                try:
+                    status_code = int(status_str)
+                except ValueError:
+                    status_code = 200
+                meta_list.append((resp_hash, status_code))
+        return meta_list
 
     def exists(self, request: CachedRequest) -> bool:
         """
@@ -678,12 +728,18 @@ class CacheStorage:
 
     # ---- Internal helpers ----
 
-    def _store_response(self, response: CachedResponse) -> tuple[str, bool]:
+    def _store_response(self, response: CachedResponse, request_path: str = "") -> tuple[str, bool]:
         """
         Store a response to the `responses/` directory.
 
         Handles both streaming (chunks → NDJSON) and non-streaming (body → JSON).
         Computes a content hash for deduplication.
+
+        `request_path` is the originating HTTP path (e.g. ``/v1/completions``) used
+        by the reassembly dispatcher to pick the correct reassembler for streaming
+        responses.  Passing an empty string falls back to Chat Completions shape,
+        which silently drops text for ``/v1/completions`` streams — callers should
+        always thread the real path through.
 
         Returns a tuple of (response_hash, has_stream).
         """
@@ -692,7 +748,7 @@ class CacheStorage:
         if response.is_streaming and response.chunks:
             # Reassemble the response to get a JSON body for hashing and storage
             from inference_gate.recording.reassembly import reassemble_streaming_response
-            reassembled = reassemble_streaming_response(response.chunks, "")
+            reassembled = reassemble_streaming_response(response.chunks, request_path)
             if reassembled:
                 response_hash = compute_response_hash(reassembled)
             else:
@@ -732,11 +788,24 @@ class CacheStorage:
 
         return response_hash, has_stream
 
-    def _build_reply_info(self, reply_number: int, response_hash: str, has_stream: bool, response: CachedResponse) -> ReplyInfo:
+    def _build_reply_info(self, reply_number: int, response_hash: str, has_stream: bool, response: CachedResponse,
+                          request_path: str = "") -> ReplyInfo:
         """
-        Build a `ReplyInfo` from a response, extracting text and token counts.
+        Build a `ReplyInfo` from a response, extracting text, reasoning, and token counts.
+
+        Faithfully records the upstream HTTP status code (including 4xx/5xx error codes)
+        via `response.status_code`.  Reasoning content (from models that expose
+        chain-of-thought such as DeepSeek-R1, gpt-oss, Qwen3-thinking) is extracted
+        from `message.reasoning_content` / `message.reasoning` and stored as a
+        separate field for readability in tapes.
+
+        `request_path` is threaded through to the streaming reassembler so that
+        ``/v1/completions`` (text completion) responses produce a body with
+        populated ``choices[*].text`` instead of being coerced to an empty
+        chat-completion shell.
         """
         text = ""
+        reasoning = ""
         stop_reason = None
         input_tokens = None
         output_tokens = None
@@ -746,7 +815,7 @@ class CacheStorage:
         body = response.body
         if body is None and response.is_streaming and response.chunks:
             from inference_gate.recording.reassembly import reassemble_streaming_response
-            body = reassemble_streaming_response(response.chunks, "")
+            body = reassemble_streaming_response(response.chunks, request_path)
 
         if body and isinstance(body, dict):
             # Chat Completions format
@@ -755,6 +824,12 @@ class CacheStorage:
                 choice = choices[0]
                 message = choice.get("message", {})
                 text = message.get("content") or ""
+                # Text-completion (/v1/completions) shape: no `message`, text is on the choice directly.
+                if not text and choice.get("text"):
+                    text = choice["text"]
+                # Reasoning content key varies between providers; prefer reasoning_content,
+                # then reasoning (DeepSeek-R1 and a few others use the shorter form).
+                reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
                 stop_reason = choice.get("finish_reason")
 
                 # Extract tool calls
@@ -789,7 +864,9 @@ class CacheStorage:
             stop_reason=stop_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            status_code=response.status_code,
             text=text,
+            reasoning=reasoning,
             tool_calls=tool_calls,
         )
 
@@ -805,6 +882,52 @@ class CacheStorage:
             return matches[0]
         return None
 
+    def _migrate_v1_tapes(self) -> int:
+        """
+        Migrate any ``tape_version=1`` tape files in-place to the v2 format.
+
+        The v2 format adds an explicit HTTP ``status_code`` in YAML frontmatter and
+        a per-reply ``Status:`` metadata header.  Since v1 tapes predate error
+        recording, every reply is stamped ``status_code=200`` (assumed-successful).
+        The tape body is otherwise left unchanged — no reasoning is synthesized
+        since v1 tapes never captured reasoning content.
+
+        Returns the number of tapes migrated.  Runs lazily on first ``CacheStorage``
+        open and is a no-op for directories that already contain only v2 tapes.
+        """
+        migrated = 0
+        for tape_path in self.requests_dir.glob("*.tape"):
+            try:
+                content = tape_path.read_text(encoding="utf-8")
+                metadata, sections = parse_tape(content)
+            except (ValueError, OSError) as exc:
+                self.log.warning("Skipping unreadable tape %s during migration: %s", tape_path.name, exc)
+                continue
+
+            if metadata.tape_version >= 2:
+                continue
+
+            # Bump version, stamp primary status_code (assumed 200 for pre-existing tapes).
+            metadata.tape_version = 2
+            metadata.status_code = 200
+
+            # Inject Status: 200 into every reply section that is missing it.  Preserve
+            # any other existing metadata verbatim (Response, Stream, Stop-Reason, etc.).
+            for section in sections:
+                if section.kind == SectionKind.REPLY and "Status" not in section.metadata:
+                    section.metadata["Status"] = "200"
+
+            try:
+                write_tape_to_file(tape_path, metadata, sections)
+            except OSError as exc:
+                self.log.warning("Failed to rewrite %s during migration: %s", tape_path.name, exc)
+                continue
+            migrated += 1
+
+        if migrated > 0:
+            self.log.info("Migrated %d tape(s) from v1 to v2 in %s", migrated, self.requests_dir)
+        return migrated
+
     def _load_entry(self, content_hash: str, request: CachedRequest | None = None) -> CacheEntry | None:
         """
         Load a full CacheEntry from tape + response files.
@@ -817,18 +940,18 @@ class CacheStorage:
 
         metadata, sections = result
 
-        # Find first reply section's response hash
-        response_hashes = self.get_reply_response_hashes(content_hash)
-        if not response_hashes:
+        # Find first reply section's response hash + status
+        reply_meta = self.get_reply_metadata(content_hash)
+        if not reply_meta:
             return None
 
         # Load the first reply's response (caller can request specific via load_response)
-        response_hash = response_hashes[0]
-        cached_response = self.load_response(response_hash, streaming=True)
+        response_hash, status_code = reply_meta[0]
+        cached_response = self.load_response(response_hash, streaming=True, status_code=status_code)
 
         # Fall back to non-streaming if no NDJSON
         if cached_response is None:
-            cached_response = self.load_response(response_hash, streaming=False)
+            cached_response = self.load_response(response_hash, streaming=False, status_code=status_code)
 
         if cached_response is None:
             self.log.warning("Response %s not found for cassette %s", response_hash, content_hash)

@@ -16,8 +16,8 @@ import io
 import logging
 from pathlib import Path
 
-from inference_gate.recording.models import IndexRow, TapeMetadata
-from inference_gate.recording.tape_parser import parse_tape_frontmatter
+from inference_gate.recording.models import IndexRow, SectionKind, TapeMetadata, TapeSection
+from inference_gate.recording.tape_parser import parse_tape
 
 # TSV column order — must match IndexRow fields
 _TSV_COLUMNS = [
@@ -25,6 +25,7 @@ _TSV_COLUMNS = [
     "prompt_model_hash",
     "prompt_hash",
     "model",
+    "endpoint",
     "is_greedy",
     "temperature",
     "tokens_in",
@@ -33,6 +34,8 @@ _TSV_COLUMNS = [
     "max_replies",
     "has_logprobs",
     "has_tool_use",
+    "status_code",
+    "has_reasoning",
     "slug",
     "recorded",
     "first_user_message",
@@ -63,6 +66,7 @@ class TapeIndex:
         self.by_prompt_model_hash: dict[str, list[IndexRow]] = {}
         self.by_prompt_hash: dict[str, list[IndexRow]] = {}
         self._rows: list[IndexRow] = []
+        self._needs_rebuild = False
 
         if index_path.exists():
             self._load()
@@ -83,6 +87,12 @@ class TapeIndex:
             return
 
         reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+        # Detect column mismatch — if the TSV was written by an older version
+        # with fewer columns, flag for rebuild so that tape frontmatter data
+        # (e.g. endpoint) can be backfilled.
+        if reader.fieldnames and set(reader.fieldnames) != set(_TSV_COLUMNS):
+            self._needs_rebuild = True
+            self.log.info("Index columns differ from current schema — will rebuild from tapes on next opportunity")
         for raw_row in reader:
             try:
                 row = _parse_tsv_row(raw_row)
@@ -116,9 +126,14 @@ class TapeIndex:
         self._add_row_to_indexes(row)
         self._write_tsv()
 
-    def update_replies(self, content_hash: str, new_replies_count: int, tokens_in: str = "", tokens_out: str = "") -> None:
+    def update_replies(self, content_hash: str, new_replies_count: int, tokens_in: str = "", tokens_out: str = "",
+                       has_reasoning: bool | None = None) -> None:
         """
-        Update the reply count (and optionally token counts) for an existing entry.
+        Update the reply count (and optionally token counts / reasoning flag) for an existing entry.
+
+        When ``has_reasoning`` is provided, the flag is OR-ed with the existing value so
+        that a multi-reply cassette keeps its ``has_reasoning=True`` status once any
+        reply carries reasoning content.
         """
         row = self.by_content_hash.get(content_hash)
         if row is None:
@@ -126,11 +141,14 @@ class TapeIndex:
             return
 
         # Pydantic model — create updated copy
-        updated = row.model_copy(update={
+        update_fields: dict[str, object] = {
             "replies": new_replies_count,
             "tokens_in": tokens_in or row.tokens_in,
             "tokens_out": tokens_out or row.tokens_out,
-        })
+        }
+        if has_reasoning is not None:
+            update_fields["has_reasoning"] = row.has_reasoning or has_reasoning
+        updated = row.model_copy(update=update_fields)
 
         # Replace in all structures
         self._remove_row(row)
@@ -177,8 +195,10 @@ class TapeIndex:
         """
         Rebuild the entire index from tape files in `requests_dir`.
 
-        Scans all `.tape` files, parses frontmatter only (fast), and
-        regenerates `index.tsv` from scratch.
+        Scans all `.tape` files, parses frontmatter and body sections,
+        and regenerates ``index.tsv`` from scratch.  Body sections are
+        parsed so that ``first_user_message`` can be extracted from the
+        conversation content (including raw ``prompt`` tapes).
         """
         self.by_content_hash.clear()
         self.by_prompt_model_hash.clear()
@@ -188,11 +208,14 @@ class TapeIndex:
         for tape_file in sorted(requests_dir.glob("*.tape")):
             try:
                 content = tape_file.read_text(encoding="utf-8")
-                meta = parse_tape_frontmatter(content)
+                meta, sections = parse_tape(content)
                 slug = _extract_slug_from_filename(tape_file.name)
-                # We don't have the first_user_message without parsing the body,
-                # but for reindex we parse frontmatter only. Leave it as stored slug.
-                row = IndexRow.from_tape_metadata(meta, slug=slug, first_user_message="")
+                # Extract first user message from body sections
+                first_user_msg = _extract_first_user_from_sections(sections)
+                # Any non-empty reasoning sub-section marks the cassette as having reasoning.
+                has_reasoning = any(
+                    section.kind == SectionKind.REPLY_REASONING and bool(section.body) for section in sections)
+                row = IndexRow.from_tape_metadata(meta, slug=slug, first_user_message=first_user_msg, has_reasoning=has_reasoning)
                 self._add_row_to_indexes(row)
             except Exception as exc:
                 self.log.warning("Skipping unreadable tape %s during reindex: %s", tape_file.name, exc)
@@ -229,6 +252,7 @@ def _row_to_tsv_dict(row: IndexRow) -> dict[str, str]:
         "prompt_model_hash": row.prompt_model_hash,
         "prompt_hash": row.prompt_hash,
         "model": row.model,
+        "endpoint": row.endpoint,
         "is_greedy": "true" if row.is_greedy else "false",
         "temperature": row.temperature,
         "tokens_in": row.tokens_in,
@@ -237,6 +261,8 @@ def _row_to_tsv_dict(row: IndexRow) -> dict[str, str]:
         "max_replies": str(row.max_replies),
         "has_logprobs": "true" if row.has_logprobs else "false",
         "has_tool_use": "true" if row.has_tool_use else "false",
+        "status_code": str(row.status_code),
+        "has_reasoning": "true" if row.has_reasoning else "false",
         "slug": row.slug,
         "recorded": row.recorded,
         "first_user_message": row.first_user_message,
@@ -246,12 +272,23 @@ def _row_to_tsv_dict(row: IndexRow) -> dict[str, str]:
 def _parse_tsv_row(raw: dict[str, str | None]) -> IndexRow:
     """
     Parse a raw TSV row dict into an IndexRow.
+
+    Tolerates missing ``status_code`` / ``has_reasoning`` columns (v1 index files
+    written before v2 format support) by defaulting to 200 / False.  When such
+    columns are absent the ``TapeIndex`` load path flags the file for rebuild
+    so that the values can be backfilled from tape frontmatter / body sections.
     """
+    status_str = raw.get("status_code", "") or ""
+    try:
+        status_code = int(status_str) if status_str else 200
+    except ValueError:
+        status_code = 200
     return IndexRow(
         content_hash=raw.get("content_hash", "") or "",
         prompt_model_hash=raw.get("prompt_model_hash", "") or "",
         prompt_hash=raw.get("prompt_hash", "") or "",
         model=raw.get("model", "") or "",
+        endpoint=raw.get("endpoint", "") or "",
         is_greedy=(raw.get("is_greedy", "") or "").lower() == "true",
         temperature=raw.get("temperature", "") or "",
         tokens_in=raw.get("tokens_in", "") or "",
@@ -260,6 +297,8 @@ def _parse_tsv_row(raw: dict[str, str | None]) -> IndexRow:
         max_replies=int(raw.get("max_replies", "1") or "1"),
         has_logprobs=(raw.get("has_logprobs", "") or "").lower() == "true",
         has_tool_use=(raw.get("has_tool_use", "") or "").lower() == "true",
+        status_code=status_code,
+        has_reasoning=(raw.get("has_reasoning", "") or "").lower() == "true",
         slug=raw.get("slug", "") or "",
         recorded=raw.get("recorded", "") or "",
         first_user_message=raw.get("first_user_message", "") or "",
@@ -275,4 +314,20 @@ def _extract_slug_from_filename(filename: str) -> str:
     name = filename.removesuffix(".tape")
     if "__" in name:
         return name.split("__", 1)[1]
+    return ""
+
+
+def _extract_first_user_from_sections(sections: list[TapeSection], max_length: int = 120) -> str:
+    """
+    Extract the first user message text from parsed tape sections.
+
+    Looks for the first ``USER`` section and returns its body text,
+    truncated to ``max_length`` with newlines/tabs replaced by spaces.
+    Used during index rebuild to populate ``first_user_message``.
+    """
+    for section in sections:
+        if section.kind == SectionKind.USER and section.body:
+            text = section.body[:max_length]
+            text = text.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+            return text
     return ""

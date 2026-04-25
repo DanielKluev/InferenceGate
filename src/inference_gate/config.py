@@ -62,6 +62,13 @@ class Config(BaseModel):
         default=5, description="Maximum number of replies to collect per non-greedy cassette "
         "before switching to replay cycling")
 
+    # Multi-upstream model routing (for recording sessions with multiple backends)
+    model_routes: dict[str, dict[str, Any]] = Field(
+        default_factory=dict, description="Maps model names (or glob patterns) to upstream "
+        "configs for multi-backend recording.  Each value is a dict with 'upstream', and "
+        "optionally 'api_key', 'timeout', 'proxy'. Example: "
+        "{'Gemma4:*': {'upstream': 'http://127.0.0.1:8125/', 'api_key': 'KEY'}}")
+
     # Test command settings
     test_prompt: str = Field(
         default='This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.',

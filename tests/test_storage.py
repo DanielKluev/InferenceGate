@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from inference_gate.recording.hashing import compute_content_hash
+from inference_gate.recording.hashing import (compute_content_hash, compute_prompt_hash, extract_first_user_message, generate_slug)
 from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
+from inference_gate.recording.tape_writer import build_message_sections
 
 
 @pytest.fixture
@@ -255,6 +256,45 @@ class TestCacheStorage:
         key_without = compute_content_hash("POST", "/v1/chat/completions", body_without)
 
         assert key_with == key_without, "stream_options should be excluded from cache key"
+
+    def test_text_completion_streaming_preserves_text(self, storage, temp_cache_dir):
+        """Test that a streaming /v1/completions response reassembles with non-empty text.
+
+        Regression: previously `_store_response` and `_build_reply_info` passed an
+        empty request_path to the reassembler, causing the dispatcher to fall back
+        to Chat Completions shape which discards the `choices[*].text` field and
+        records an empty body.  The stored JSON must now carry the text.
+        """
+        import json
+        request = CachedRequest(method="POST", path="/v1/completions", headers={}, body={
+            "model": "gpt-4",
+            "prompt": "Hello",
+            "stream": True,
+            "temperature": 0,
+        })
+        response = CachedResponse(
+            status_code=200,
+            headers={},
+            chunks=[
+                'data: {"id":"cmpl-1","object":"text_completion","created":1700000000,"model":"gpt-4","choices":[{"index":0,"text":"Hel","finish_reason":null}]}\n\n',
+                'data: {"id":"cmpl-1","object":"text_completion","created":1700000000,"model":"gpt-4","choices":[{"index":0,"text":"lo","finish_reason":"stop"}]}\n\n',
+                'data: [DONE]\n\n',
+            ],
+            is_streaming=True,
+        )
+        entry = CacheEntry(request=request, response=response, model="gpt-4")
+        storage.put(entry)
+
+        # The reassembled JSON body must be persisted with object=text_completion
+        # and non-empty text (not coerced to an empty chat.completion).
+        responses_dir = Path(temp_cache_dir) / "responses"
+        json_files = list(responses_dir.glob("*.json"))
+        assert json_files, "Expected at least one reassembled JSON response file."
+        reassembled = json.loads(json_files[0].read_text(encoding="utf-8"))
+        assert reassembled["object"] == "text_completion", \
+            f"Expected text_completion, got {reassembled.get('object')!r} - request path was not threaded through."
+        assert reassembled["choices"][0]["text"] == "Hello", \
+            f"Expected concatenated text 'Hello', got {reassembled['choices'][0].get('text')!r}"
 
     def test_original_client_streaming_metadata(self, storage):
         """Test that original_client_streaming metadata is stored in CacheEntry."""
@@ -687,3 +727,220 @@ class TestUpdateMaxReplies:
         assert tape_data is not None
         metadata, _ = tape_data
         assert metadata.max_replies == 10
+
+
+# ===========================================================================
+# Tests for raw Completions API prompt field support
+# ===========================================================================
+
+
+class TestRawPromptSupport:
+    """
+    Tests for raw Completions API (``/v1/completions``, ``/completion``) prompt handling.
+
+    Ensures that requests with a ``prompt`` field (pre-formatted by chat template)
+    produce meaningful hashes, slugs, user messages, and tape sections — not empty values.
+    """
+
+    def test_compute_prompt_hash_raw_prompt(self):
+        """Test that compute_prompt_hash returns a non-null hash for raw prompt bodies."""
+        body = {"prompt": "<user>\nWhat is 2+2?\n<assistant>\n", "model": "test"}
+        empty_body_hash = compute_prompt_hash(None)
+        prompt_hash = compute_prompt_hash(body)
+        assert prompt_hash != empty_body_hash
+
+    def test_compute_prompt_hash_raw_prompt_deterministic(self):
+        """Test that compute_prompt_hash is deterministic for the same raw prompt."""
+        body = {"prompt": "Hello, world!", "model": "test"}
+        h1 = compute_prompt_hash(body)
+        h2 = compute_prompt_hash(body)
+        assert h1 == h2
+
+    def test_compute_prompt_hash_different_prompts_differ(self):
+        """Test that different raw prompts produce different hashes."""
+        body_a = {"prompt": "What is 2+2?", "model": "test"}
+        body_b = {"prompt": "What is 3+3?", "model": "test"}
+        assert compute_prompt_hash(body_a) != compute_prompt_hash(body_b)
+
+    def test_compute_prompt_hash_raw_vs_messages_differ(self):
+        """Test that a raw prompt hash differs from a messages-based hash with the same text."""
+        raw_body = {"prompt": "What is 2+2?"}
+        messages_body = {"messages": [{"role": "user", "content": "What is 2+2?"}]}
+        # Different formats should never cross-match at tier 3
+        assert compute_prompt_hash(raw_body) != compute_prompt_hash(messages_body)
+
+    def test_generate_slug_raw_prompt(self):
+        """Test that generate_slug extracts text from raw prompt field."""
+        body = {"prompt": "<user>\nHello world\n<assistant>", "model": "test"}
+        slug = generate_slug(body)
+        assert slug != ""
+        assert "user" in slug or "hello" in slug  # Should contain some text from prompt
+
+    def test_generate_slug_prefers_messages_over_prompt(self):
+        """Test that messages field takes priority over prompt field when both present."""
+        body = {"messages": [{"role": "user", "content": "From messages"}], "prompt": "From prompt"}
+        slug = generate_slug(body)
+        assert "from-messages" == slug
+
+    def test_extract_first_user_message_raw_prompt(self):
+        """Test that extract_first_user_message returns text from raw prompt field."""
+        body = {"prompt": "Tell me about cats", "model": "test"}
+        msg = extract_first_user_message(body)
+        assert msg == "Tell me about cats"
+
+    def test_extract_first_user_message_raw_prompt_sanitizes(self):
+        """Test that newlines and tabs in raw prompts are sanitized for TSV."""
+        body = {"prompt": "Line one\nLine two\tTabbed", "model": "test"}
+        msg = extract_first_user_message(body)
+        assert "\n" not in msg
+        assert "\t" not in msg
+        assert "Line one Line two Tabbed" == msg
+
+    def test_extract_first_user_message_truncates(self):
+        """Test that raw prompts are truncated to max_length."""
+        body = {"prompt": "x" * 200, "model": "test"}
+        msg = extract_first_user_message(body, max_length=50)
+        assert len(msg) == 50
+
+    def test_build_message_sections_raw_prompt(self):
+        """Test that build_message_sections creates a USER section for raw prompt."""
+        body = {"prompt": "<user>Hello</user>", "model": "test"}
+        sections = build_message_sections(body, "abc123")
+        assert len(sections) == 1
+        assert sections[0].kind.value == "user"
+        assert sections[0].body == "<user>Hello</user>"
+
+    def test_build_message_sections_prefers_messages(self):
+        """Test that messages field takes priority over prompt in build_message_sections."""
+        body = {"messages": [{"role": "user", "content": "From messages"}], "prompt": "From prompt"}
+        sections = build_message_sections(body, "abc123")
+        assert len(sections) == 1
+        assert sections[0].body == "From messages"
+
+    def test_put_and_get_raw_completions(self, storage):
+        """Test that a raw /v1/completions request is stored with prompt in tape and index."""
+        request = CachedRequest(
+            method="POST",
+            path="/v1/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "test-model",
+                "prompt": "<user>\nWrite about cats\n<assistant>\n",
+                "max_tokens": 128,
+                "temperature": 0.7,
+            },
+        )
+        response = CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={"choices": [{
+                "text": "Cats are wonderful creatures."
+            }]},
+        )
+        entry = CacheEntry(request=request, response=response, model="test-model", temperature=0.7)
+        content_hash = storage.put(entry)
+
+        # Verify index entry has non-empty slug and first_user_message
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row is not None
+        assert row.slug != ""
+        assert row.first_user_message != ""
+        assert row.endpoint == "/v1/completions"
+        assert "cats" in row.first_user_message.lower() or "user" in row.first_user_message.lower()
+
+        # Verify the prompt_hash is not the null hash
+        null_hash = compute_prompt_hash(None)
+        assert row.prompt_hash != null_hash
+
+        # Verify tape file contains the raw prompt as a user section
+        tape_data = storage.load_tape(content_hash)
+        assert tape_data is not None
+        metadata, sections = tape_data
+        user_sections = [s for s in sections if s.kind.value == "user"]
+        assert len(user_sections) == 1
+        assert "cats" in user_sections[0].body.lower()
+
+    def test_raw_completions_prompt_hash_enables_fuzzy_match(self, storage):
+        """Test that two raw prompt requests with the same prompt but different sampling share prompt_hash."""
+        body_base = {"model": "test", "prompt": "Hello raw prompt", "max_tokens": 100}
+
+        request1 = CachedRequest(method="POST", path="/v1/completions", headers={}, body={**body_base, "temperature": 0.5})
+        request2 = CachedRequest(method="POST", path="/v1/completions", headers={}, body={**body_base, "temperature": 0.9})
+
+        response = CachedResponse(status_code=200, headers={}, body={"choices": [{"text": "OK"}]})
+        storage.put(CacheEntry(request=request1, response=response, model="test"))
+
+        # Both should share the same prompt_hash
+        hash1 = compute_prompt_hash(request1.body)
+        hash2 = compute_prompt_hash(request2.body)
+        assert hash1 == hash2
+
+        # prompt_hash lookup should find the stored entry
+        rows = storage.index.by_prompt_hash.get(hash1, [])
+        assert len(rows) == 1
+
+
+# ===========================================================================
+# Tests for endpoint column in index.tsv
+# ===========================================================================
+
+
+class TestEndpointColumn:
+    """
+    Tests for the ``endpoint`` column in index.tsv.
+
+    Ensures that the request path (e.g. ``/v1/chat/completions``,
+    ``/v1/completions``) is stored in the index for each cassette.
+    """
+
+    def test_endpoint_stored_chat_completions(self, storage):
+        """Test that /v1/chat/completions entries have endpoint in index."""
+        entry = _make_entry(model="gpt-4", message="Endpoint test")
+        content_hash = storage.put(entry)
+
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row is not None
+        assert row.endpoint == "/v1/chat/completions"
+
+    def test_endpoint_stored_raw_completions(self, storage):
+        """Test that /v1/completions entries have endpoint in index."""
+        request = CachedRequest(method="POST", path="/v1/completions", headers={}, body={
+            "model": "test",
+            "prompt": "Hello",
+            "temperature": 0,
+        })
+        response = CachedResponse(status_code=200, headers={}, body={"choices": [{"text": "Hi"}]})
+        entry = CacheEntry(request=request, response=response, model="test")
+        content_hash = storage.put(entry)
+
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row is not None
+        assert row.endpoint == "/v1/completions"
+
+    def test_endpoint_in_tsv_roundtrip(self, storage):
+        """Test that endpoint column survives TSV write/read cycle."""
+        entry = _make_entry(model="gpt-4", message="TSV roundtrip")
+        content_hash = storage.put(entry)
+
+        # Read the TSV directly
+        tsv_text = (storage.cache_dir / "index.tsv").read_text(encoding="utf-8")
+        assert "endpoint" in tsv_text.split("\n")[0]  # Header contains endpoint
+        assert "/v1/chat/completions" in tsv_text
+
+        # Reload storage from disk and verify
+        storage2 = CacheStorage(storage.cache_dir)
+        row = storage2.index.by_content_hash.get(content_hash)
+        assert row is not None
+        assert row.endpoint == "/v1/chat/completions"
+
+    def test_endpoint_in_reindex(self, storage):
+        """Test that endpoint is populated during reindex from tape frontmatter."""
+        entry = _make_entry(model="gpt-4", message="Reindex endpoint")
+        content_hash = storage.put(entry)
+
+        # Wipe and rebuild index
+        storage.reindex()
+
+        row = storage.index.by_content_hash.get(content_hash)
+        assert row is not None
+        assert row.endpoint == "/v1/chat/completions"

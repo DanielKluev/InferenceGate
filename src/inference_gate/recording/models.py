@@ -38,13 +38,20 @@ class SamplingParams(BaseModel):
 
 # All sampling-related fields that should be excluded from prompt_model_hash.
 SAMPLING_PARAM_NAMES: frozenset[str] = frozenset({
-    "temperature", "top_p", "top_k", "min_p",
-    "repetition_penalty", "frequency_penalty", "presence_penalty", "seed",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
 })
 
 # Fields always excluded from ALL hash computations (non-deterministic or transport-level).
 ALWAYS_EXCLUDED_FIELDS: frozenset[str] = frozenset({
-    "stream", "stream_options",
+    "stream",
+    "stream_options",
 })
 
 
@@ -82,8 +89,14 @@ class ReplyInfo(BaseModel):
     input_tokens: int | None = None
     output_tokens: int | None = None
     latency_ms: int | None = None
+    # HTTP status code from the upstream response. Defaults to 200 for backward compatibility
+    # with v1 tapes (see migration in CacheStorage).  Non-200 statuses indicate recorded errors.
+    status_code: int = 200
     # The reassembled plain-text body of the reply (for human readability in the tape)
     text: str = ""
+    # Reasoning / chain-of-thought content, stored separately from `text` so that it can be
+    # rendered in its own MIME sub-section for readability and inspected programmatically.
+    reasoning: str = ""
     # Tool calls within this reply: list of (tool_name, tool_call_id, arguments_json)
     tool_calls: list[tuple[str, str, str]] = Field(default_factory=list)
 
@@ -99,6 +112,7 @@ class SectionKind(str, Enum):
     USER_ATTACHMENT = "user_attachment"
     TOOLS = "tools"
     REPLY = "reply"
+    REPLY_REASONING = "reply_reasoning"
     REPLY_TOOL_CALL = "reply_tool_call"
     UNKNOWN = "unknown"
 
@@ -133,7 +147,7 @@ class TapeMetadata(BaseModel):
     without parsing the MIME body sections.
     """
 
-    tape_version: int = 1
+    tape_version: int = 2
     content_hash: str = ""
     prompt_model_hash: str = ""
     prompt_hash: str = ""
@@ -149,6 +163,10 @@ class TapeMetadata(BaseModel):
     recorded: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     replies: int = 0
     max_replies: int = 1
+    # HTTP status of the primary (first) reply.  Per-reply status is stored in each
+    # reply section's `Status:` metadata header and may differ from this value when
+    # a multi-reply tape contains mixed outcomes.
+    status_code: int = 200
     boundary: str = ""
 
 
@@ -163,6 +181,7 @@ class IndexRow(BaseModel):
     prompt_model_hash: str
     prompt_hash: str
     model: str = ""
+    endpoint: str = ""
     is_greedy: bool = False
     temperature: str = ""  # stored as string to distinguish "0.0" from empty/absent
     tokens_in: str = ""
@@ -171,15 +190,24 @@ class IndexRow(BaseModel):
     max_replies: int = 1
     has_logprobs: bool = False
     has_tool_use: bool = False
+    # HTTP status of the primary reply.  Defaults to 200 for v1 cassettes and for
+    # tapes that predate the status_code field.
+    status_code: int = 200
+    # True when any reply in the cassette has non-empty reasoning/CoT content.
+    has_reasoning: bool = False
     slug: str = ""
     recorded: str = ""
     first_user_message: str = ""
 
     @classmethod
-    def from_tape_metadata(cls, meta: TapeMetadata, slug: str, first_user_message: str,
-                           tokens_in: str = "", tokens_out: str = "") -> IndexRow:
+    def from_tape_metadata(cls, meta: TapeMetadata, slug: str, first_user_message: str, tokens_in: str = "", tokens_out: str = "",
+                           has_reasoning: bool = False) -> IndexRow:
         """
         Create an IndexRow from a TapeMetadata and supplementary data.
+
+        `has_reasoning` should be set by the caller based on whether any reply
+        in the cassette carries reasoning content (determined after parsing the
+        body sections).  Defaults to False.
         """
         temp_str = ""
         if meta.sampling.temperature is not None:
@@ -190,6 +218,7 @@ class IndexRow(BaseModel):
             prompt_model_hash=meta.prompt_model_hash,
             prompt_hash=meta.prompt_hash,
             model=meta.model or "",
+            endpoint=meta.endpoint or "",
             is_greedy=meta.sampling.is_greedy,
             temperature=temp_str,
             tokens_in=tokens_in,
@@ -198,6 +227,8 @@ class IndexRow(BaseModel):
             max_replies=meta.max_replies,
             has_logprobs=meta.logprobs,
             has_tool_use=bool(meta.tools),
+            status_code=meta.status_code,
+            has_reasoning=has_reasoning,
             slug=slug,
             recorded=meta.recorded.isoformat() if meta.recorded else "",
             first_user_message=first_user_message,

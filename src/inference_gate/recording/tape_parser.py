@@ -268,6 +268,10 @@ def _parse_header(header: str) -> tuple[SectionKind, int | None, str | None, str
             tool_call_id = parts[4] if len(parts) > 4 else None
             return SectionKind.REPLY_TOOL_CALL, reply_num, tool_name, tool_call_id
 
+        # "reply N reasoning" — chain-of-thought / reasoning content for reply N.
+        if len(parts) >= 3 and parts[2].lower() == "reasoning":
+            return SectionKind.REPLY_REASONING, reply_num, None, None
+
         return SectionKind.REPLY, reply_num, None, None
 
     return SectionKind.UNKNOWN, None, None, None

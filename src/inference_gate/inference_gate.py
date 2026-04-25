@@ -13,6 +13,7 @@ import logging
 from inference_gate.inflow.server import InflowServer
 from inference_gate.modes import Mode
 from inference_gate.outflow.client import OutflowClient
+from inference_gate.outflow.model_router import OutflowRouter, UpstreamConfig
 from inference_gate.recording.storage import CacheStorage
 from inference_gate.router.router import Router
 
@@ -28,8 +29,8 @@ class InferenceGate:
     def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
                  upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
                  web_ui_port: int = 8081, non_streaming_models: list[str] | None = None, fuzzy_model: bool = False,
-                 fuzzy_sampling: str = "off", max_non_greedy_replies: int = 5, upstream_timeout: float = 120.0,
-                 proxy: str | None = None) -> None:
+                 fuzzy_sampling: str = "off", max_non_greedy_replies: int = 5, upstream_timeout: float = 120.0, proxy: str | None = None,
+                 model_routes: dict[str, UpstreamConfig] | None = None) -> None:
         """
         Initialize InferenceGate with configuration.
 
@@ -48,6 +49,11 @@ class InferenceGate:
         `upstream_timeout` is the timeout in seconds for upstream API requests.
         `proxy` is an optional HTTP proxy URL for routing upstream requests
         through a proxy server (e.g. ``"http://127.0.0.1:8888/"``).
+        `model_routes` maps model names (or glob patterns) to ``UpstreamConfig``
+        instances for multi-upstream recording.  When provided in
+        ``RECORD_AND_REPLAY`` mode, an ``OutflowRouter`` is created instead
+        of a plain ``OutflowClient``, and requests are dispatched to the
+        upstream whose model route matches the request's ``model`` field.
         """
         self.log = logging.getLogger("InferenceGate")
         self.host = host
@@ -64,10 +70,11 @@ class InferenceGate:
         self.max_non_greedy_replies = max_non_greedy_replies
         self.upstream_timeout = upstream_timeout
         self.proxy = proxy
+        self.model_routes = model_routes
 
         # Components (created during start)
         self._storage: CacheStorage | None = None
-        self._outflow: OutflowClient | None = None
+        self._outflow: OutflowClient | OutflowRouter | None = None
         self._router: Router | None = None
         self._server: InflowServer | None = None
         self._webui_server: "WebUIServer | None" = None
@@ -80,10 +87,17 @@ class InferenceGate:
         """
         self._storage = CacheStorage(self.cache_dir)
 
-        # OutflowClient is only needed for RECORD_AND_REPLAY mode
+        # OutflowClient/OutflowRouter is only needed for RECORD_AND_REPLAY mode
         if self.mode == Mode.RECORD_AND_REPLAY:
-            self._outflow = OutflowClient(upstream_base_url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout,
-                                          proxy=self.proxy)
+            if self.model_routes:
+                # Multi-upstream: create an OutflowRouter that dispatches by model name
+                default_upstream = UpstreamConfig(url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout,
+                                                  proxy=self.proxy)
+                self._outflow = OutflowRouter(default_upstream=default_upstream, model_routes=self.model_routes)
+            else:
+                # Single-upstream: plain OutflowClient (backward compatible)
+                self._outflow = OutflowClient(upstream_base_url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout,
+                                              proxy=self.proxy)
         else:
             self._outflow = None
 
@@ -193,3 +207,15 @@ class InferenceGate:
         Get the CacheStorage instance, if created.
         """
         return self._storage
+
+    @property
+    def router(self) -> Router | None:
+        """
+        Get the active `Router` instance, if the gate has been started.
+
+        Exposed to allow test infrastructure (see ``inference_gate.pytest_plugin``
+        markers ``inferencegate_strict`` / ``inferencegate``) to mutate
+        per-test matching policy (``fuzzy_model`` / ``fuzzy_sampling``)
+        without restarting the proxy.
+        """
+        return self._router

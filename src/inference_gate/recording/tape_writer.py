@@ -104,11 +104,12 @@ def build_message_sections(body: dict[str, Any] | None, boundary: str) -> list[T
     tools = body.get("tools")
     if tools:
         import json
-        sections.append(TapeSection(
-            kind=SectionKind.TOOLS,
-            header="tools",
-            body=json.dumps(tools, separators=(",", ":"), ensure_ascii=False),
-        ))
+        sections.append(
+            TapeSection(
+                kind=SectionKind.TOOLS,
+                header="tools",
+                body=json.dumps(tools, separators=(",", ":"), ensure_ascii=False),
+            ))
 
     # Handle messages (Chat Completions API)
     messages = body.get("messages")
@@ -133,11 +134,15 @@ def build_message_sections(body: dict[str, Any] | None, boundary: str) -> list[T
                                 # Image attachment — store reference
                                 url_data = part.get("image_url", {})
                                 url = url_data.get("url", "") if isinstance(url_data, dict) else str(url_data)
-                                sections.append(TapeSection(
-                                    kind=SectionKind.USER_ATTACHMENT,
-                                    header="user attachment",
-                                    metadata={"Type": "image", "URL": url[:200]},
-                                ))
+                                sections.append(
+                                    TapeSection(
+                                        kind=SectionKind.USER_ATTACHMENT,
+                                        header="user attachment",
+                                        metadata={
+                                            "Type": "image",
+                                            "URL": url[:200]
+                                        },
+                                    ))
                 else:
                     text = _extract_text_content(content)
                     sections.append(TapeSection(kind=SectionKind.USER, header="user", body=text))
@@ -161,6 +166,13 @@ def build_message_sections(body: dict[str, Any] | None, boundary: str) -> list[T
             elif isinstance(item, str):
                 sections.append(TapeSection(kind=SectionKind.USER, header="user", body=item))
 
+    # Handle raw Completions API (pre-formatted prompt string from chat template).
+    # The entire pre-formatted string is stored as a single user section.
+    if not messages and not input_data:
+        prompt = body.get("prompt")
+        if prompt and isinstance(prompt, str):
+            sections.append(TapeSection(kind=SectionKind.USER, header="user", body=prompt))
+
     return sections
 
 
@@ -168,7 +180,12 @@ def build_reply_section(reply_info: ReplyInfo) -> list[TapeSection]:
     """
     Build tape sections for a single reply (reply header + optional tool_call sections).
 
-    Returns a list of `TapeSection` objects (1 reply section + 0..N tool_call sections).
+    Always emits the primary ``reply N`` section with ``Status:`` metadata so that
+    HTTP status code (including non-200 errors) is faithfully recorded in v2 tapes.
+    When ``reply_info.reasoning`` is non-empty, emits a sibling ``reply N reasoning``
+    sub-section immediately after the primary section.  Tool calls (if any) follow.
+
+    Returns a list of `TapeSection` objects (1 reply section + 0..1 reasoning section + 0..N tool_call sections).
     """
     num = reply_info.reply_number
     metadata: dict[str, str] = {}
@@ -176,6 +193,8 @@ def build_reply_section(reply_info: ReplyInfo) -> list[TapeSection]:
     metadata["Response"] = f"{reply_info.response_hash}.json"
     if reply_info.has_stream:
         metadata["Stream"] = f"{reply_info.response_hash}.chunks.ndjson"
+    # Always emit Status so v2 tapes are unambiguous (including explicit 200).
+    metadata["Status"] = str(reply_info.status_code)
     if reply_info.stop_reason:
         metadata["Stop-Reason"] = reply_info.stop_reason
     if reply_info.input_tokens is not None:
@@ -196,16 +215,28 @@ def build_reply_section(reply_info: ReplyInfo) -> list[TapeSection]:
         reply_number=num,
     ))
 
+    # Reasoning sub-section (only when non-empty).  Placed immediately after the
+    # primary reply so that human readers see the chain-of-thought alongside the answer.
+    if reply_info.reasoning:
+        sections.append(
+            TapeSection(
+                kind=SectionKind.REPLY_REASONING,
+                header=f"reply {num} reasoning",
+                body=reply_info.reasoning,
+                reply_number=num,
+            ))
+
     # Tool call sections
     for tool_name, tool_call_id, arguments_json in reply_info.tool_calls:
-        sections.append(TapeSection(
-            kind=SectionKind.REPLY_TOOL_CALL,
-            header=f"reply {num} tool_call {tool_name} {tool_call_id}",
-            body=arguments_json,
-            reply_number=num,
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-        ))
+        sections.append(
+            TapeSection(
+                kind=SectionKind.REPLY_TOOL_CALL,
+                header=f"reply {num} tool_call {tool_name} {tool_call_id}",
+                body=arguments_json,
+                reply_number=num,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+            ))
 
     return sections
 

@@ -215,3 +215,7 @@ __marimo__/
 # Local settings files
 .vscode/settings.json
 configs/
+
+# Local transient documentation and planning files
+docs/planning/
+docs/sessions/

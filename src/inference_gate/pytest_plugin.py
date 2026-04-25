@@ -168,6 +168,15 @@ def pytest_configure(config: pytest.Config) -> None:
     Register custom markers.
     """
     config.addinivalue_line("markers", "requires_recording: skip this test in replay mode (cassette not yet recorded).")
+    config.addinivalue_line(
+        "markers", "inferencegate_strict: force exact cassette matching for this test — "
+        "disables fuzzy_model and fuzzy_sampling regardless of session defaults. "
+        "Use for tests that assert exact token-level behavior (logprobs, prompt logprobs, "
+        "max_tokens-sensitive outputs) where a fuzzy cassette hit would silently mask drift.")
+    config.addinivalue_line(
+        "markers", "inferencegate(fuzzy_model=None, fuzzy_sampling=None): override cassette "
+        "matching policy for a single test. Either/both kwargs may be set; omitted kwargs "
+        "keep the session default. Supersedes inferencegate_strict when both are present.")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -253,30 +262,26 @@ class _ServerThread:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]:
+def _resolve_gate_kwargs(pytest_config: pytest.Config) -> dict[str, Any]:
     """
-    Session-scoped fixture that starts an InferenceGate proxy server.
+    Resolve all InferenceGate configuration from CLI flags, env vars, and ini options.
 
-    Resolves all configuration from CLI flags, environment variables, and
-    ini options, then launches the server in a background thread. Yields
-    the ``InferenceGate`` instance. The server is stopped on teardown.
+    Returns a kwargs dict ready to be passed to ``InferenceGate()``,
+    with model_routes support for multi-upstream recording.
 
-    In ``"replay"`` mode (default), no upstream connection is made — all
-    responses come from cached cassettes. In ``"record"`` mode, cache misses
-    are forwarded to the real AI endpoint and recorded.
+    External callers may override individual keys before constructing
+    the ``InferenceGate`` instance.
     """
     from inference_gate.config import ConfigManager
-    from inference_gate.inference_gate import InferenceGate
     from inference_gate.modes import Mode
+    from inference_gate.outflow.model_router import UpstreamConfig
 
-    config = request.config
-    mode_str = _resolve_option(config, "mode")
-    cache_dir = _resolve_option(config, "cache_dir")
-    config_path = _resolve_option(config, "config")
-    port_str = _resolve_option(config, "port") or "0"
+    mode_str = _resolve_option(pytest_config, "mode")
+    cache_dir = _resolve_option(pytest_config, "cache_dir")
+    config_path = _resolve_option(pytest_config, "config")
+    port_str = _resolve_option(pytest_config, "port") or "0"
     port = int(port_str)
-    fuzzy_raw = _resolve_option(config, "fuzzy_model")
+    fuzzy_raw = _resolve_option(pytest_config, "fuzzy_model")
     if isinstance(fuzzy_raw, bool):
         fuzzy_model = fuzzy_raw
     elif fuzzy_raw is not None:
@@ -284,10 +289,10 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
     else:
         fuzzy_model = False
 
-    fuzzy_sampling = str(_resolve_option(config, "fuzzy_sampling") or "off")
-    max_replies_raw = _resolve_option(config, "max_non_greedy_replies")
+    fuzzy_sampling = str(_resolve_option(pytest_config, "fuzzy_sampling") or "off")
+    max_replies_raw = _resolve_option(pytest_config, "max_non_greedy_replies")
     max_non_greedy_replies = int(max_replies_raw) if max_replies_raw is not None else 5
-    proxy = _resolve_option(config, "proxy") or None
+    proxy = _resolve_option(pytest_config, "proxy") or None
 
     # Map user-facing mode names to internal Mode enum
     if mode_str == "record":
@@ -300,6 +305,7 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
     api_key = None
     non_streaming_models: list[str] = []
     cfg_proxy: str | None = None
+    model_routes: dict[str, UpstreamConfig] | None = None
     if mode == Mode.RECORD_AND_REPLAY:
         try:
             cfg_manager = ConfigManager(config_path=config_path)
@@ -308,25 +314,112 @@ def inference_gate(request: pytest.FixtureRequest) -> Generator[Any, None, None]
             api_key = cfg.api_key
             non_streaming_models = cfg.non_streaming_models
             cfg_proxy = cfg.proxy
+            # Parse model_routes from YAML dicts into UpstreamConfig objects
+            if cfg.model_routes:
+                model_routes = {}
+                for pattern, route_cfg in cfg.model_routes.items():
+                    model_routes[pattern] = UpstreamConfig(url=route_cfg["upstream"], api_key=route_cfg.get("api_key", api_key),
+                                                           timeout=route_cfg.get("timeout", cfg.upstream_timeout),
+                                                           proxy=route_cfg.get("proxy", cfg_proxy))
         except Exception:
             log.warning("Could not load InferenceGate config file; using defaults for record mode")
 
     # CLI/env/ini proxy overrides config file proxy
     actual_proxy = proxy if proxy is not None else cfg_proxy
 
-    gate = InferenceGate(host="127.0.0.1", port=port, mode=mode, cache_dir=cache_dir, upstream_base_url=upstream_base_url, api_key=api_key,
-                         non_streaming_models=non_streaming_models, fuzzy_model=fuzzy_model, fuzzy_sampling=fuzzy_sampling,
-                         max_non_greedy_replies=max_non_greedy_replies, proxy=actual_proxy)
+    return {
+        "host": "127.0.0.1",
+        "port": port,
+        "mode": mode,
+        "cache_dir": cache_dir,
+        "upstream_base_url": upstream_base_url,
+        "api_key": api_key,
+        "non_streaming_models": non_streaming_models,
+        "fuzzy_model": fuzzy_model,
+        "fuzzy_sampling": fuzzy_sampling,
+        "max_non_greedy_replies": max_non_greedy_replies,
+        "proxy": actual_proxy,
+        "model_routes": model_routes,
+    }
 
+
+def _start_gate(kwargs: dict[str, Any]) -> tuple[Any, "_ServerThread"]:
+    """
+    Create, start, and health-check an InferenceGate instance.
+
+    Returns a ``(gate, server_thread)`` tuple.
+    """
+    from inference_gate.inference_gate import InferenceGate
+
+    gate = InferenceGate(**kwargs)
     server_thread = _ServerThread(gate)
     server_thread.start()
-
-    # Wait briefly for the actual port to be available, then verify health
     _wait_for_health(gate.base_url, timeout=10)
+    return gate, server_thread
 
-    yield gate
 
-    server_thread.request_stop()
+@pytest.fixture(scope="session")
+def inference_gate_factory(request: pytest.FixtureRequest) -> Generator[Any, None, None]:
+    """
+    Session-scoped factory fixture for creating InferenceGate proxy instances.
+
+    Returns a callable ``create(**overrides)`` that spins up an InferenceGate
+    server.  Configuration is resolved from CLI/env/ini options first, then
+    ``overrides`` are merged on top (e.g. ``model_routes``, ``mode``).
+
+    All servers created through the factory are stopped on session teardown.
+
+    Usage in downstream ``conftest.py``::
+
+        @pytest.fixture(scope="session")
+        def inference_gate(inference_gate_factory):
+            return inference_gate_factory()          # default settings
+
+        @pytest.fixture(scope="session")
+        def inference_gate(inference_gate_factory):
+            routes = {"Gemma4:*": UpstreamConfig(url="http://...")}
+            return inference_gate_factory(model_routes=routes)
+    """
+    base_kwargs = _resolve_gate_kwargs(request.config)
+    created: list[tuple[Any, _ServerThread]] = []
+
+    def _create(**overrides: Any) -> Any:
+        """
+        Create and start an InferenceGate instance.
+
+        Keyword arguments override the session-level defaults resolved from
+        CLI/env/ini options.  Returns the ``InferenceGate`` instance.
+        """
+        kwargs = {**base_kwargs, **overrides}
+        gate, server_thread = _start_gate(kwargs)
+        created.append((gate, server_thread))
+        return gate
+
+    yield _create
+
+    # Teardown: stop all servers created during the session
+    for _, server_thread in reversed(created):
+        server_thread.request_stop()
+
+
+@pytest.fixture(scope="session")
+def inference_gate(inference_gate_factory: Any) -> Any:
+    """
+    Session-scoped fixture that starts an InferenceGate proxy server.
+
+    Resolves all configuration from CLI flags, environment variables, and
+    ini options, then launches the server in a background thread. Yields
+    the ``InferenceGate`` instance. The server is stopped on teardown.
+
+    In ``"replay"`` mode (default), no upstream connection is made — all
+    responses come from cached cassettes. In ``"record"`` mode, cache misses
+    are forwarded to the real AI endpoint and recorded.
+
+    Projects that need to customise the Gate (e.g. inject ``model_routes``
+    from a Glue config) should override this fixture in their own
+    ``conftest.py`` and call ``inference_gate_factory(**overrides)`` directly.
+    """
+    return inference_gate_factory()
 
 
 @pytest.fixture(scope="session")
@@ -339,6 +432,64 @@ def inference_gate_url(inference_gate: Any) -> str:
     through the proxy.
     """
     return inference_gate.base_url
+
+
+@pytest.fixture(autouse=True)
+def _inferencegate_match_policy(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """
+    Apply per-test cassette matching overrides declared via the
+    ``inferencegate_strict`` / ``inferencegate`` markers.
+
+    - ``@pytest.mark.inferencegate_strict`` forces ``fuzzy_model=False`` and
+      ``fuzzy_sampling="off"`` for the duration of the test, so only exact
+      ``content_hash`` cassette hits are served.  Intended for tests that
+      assert exact token-level behavior (sampled logprobs, prompt logprobs,
+      ``max_tokens``-sensitive outputs) where a fuzzy match would silently
+      mask drift.
+    - ``@pytest.mark.inferencegate(fuzzy_model=..., fuzzy_sampling=...)``
+      overrides either/both individual flags.  When both markers are
+      present, kwargs from ``inferencegate`` take precedence.
+
+    Only activates (and pulls in the session-scoped ``inference_gate``
+    fixture) when at least one of the markers is applied to the test —
+    unmarked tests incur no overhead.
+    """
+    strict_marker = request.node.get_closest_marker("inferencegate_strict")
+    custom_marker = request.node.get_closest_marker("inferencegate")
+    if strict_marker is None and custom_marker is None:
+        yield
+        return
+
+    # Lazily resolve inference_gate so tests that don't otherwise use it
+    # still pay nothing for simply importing the plugin.
+    gate = request.getfixturevalue("inference_gate")
+    router = gate.router
+    if router is None:
+        # Gate was yielded but not started — nothing to override.
+        yield
+        return
+
+    # Build override values: strict baseline, then apply custom kwargs.
+    overrides: dict[str, Any] = {}
+    if strict_marker is not None:
+        overrides["fuzzy_model"] = False
+        overrides["fuzzy_sampling"] = "off"
+    if custom_marker is not None:
+        for key in ("fuzzy_model", "fuzzy_sampling"):
+            if key in custom_marker.kwargs:
+                overrides[key] = custom_marker.kwargs[key]
+
+    # Snapshot + apply.
+    saved = {key: getattr(router, key) for key in overrides}
+    for key, value in overrides.items():
+        setattr(router, key, value)
+    log.debug("inferencegate match-policy override for %s: %s (restored on teardown)", request.node.nodeid, overrides)
+
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            setattr(router, key, value)
 
 
 # ---------------------------------------------------------------------------

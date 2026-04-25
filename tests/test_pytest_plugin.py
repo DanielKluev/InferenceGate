@@ -449,6 +449,94 @@ class TestRequiresRecordingMarker:
         result.assert_outcomes(passed=1)
 
 
+class TestStrictMatchingMarker:
+    """Tests for the @pytest.mark.inferencegate_strict / @pytest.mark.inferencegate markers."""
+
+    def test_strict_marker_registered(self, pytester):
+        """Running pytest --markers should list inferencegate_strict and inferencegate."""
+        result = pytester.runpytest("--markers")
+        result.stdout.fnmatch_lines(["*inferencegate_strict*"])
+        result.stdout.fnmatch_lines(["*inferencegate(fuzzy_model*"])
+
+    def test_strict_marker_forces_exact_matching(self, pytester):
+        """
+        @pytest.mark.inferencegate_strict must flip router.fuzzy_model to False
+        and router.fuzzy_sampling to "off" during the test, regardless of
+        session defaults enabling fuzzy matching.
+        """
+        pytester.makepyfile("""
+            import pytest
+
+            @pytest.mark.inferencegate_strict
+            def test_strict(inference_gate):
+                router = inference_gate.router
+                assert router is not None
+                assert router.fuzzy_model is False
+                assert router.fuzzy_sampling == "off"
+
+            def test_unmarked(inference_gate):
+                # Session default (fuzzy_model=true here) must be preserved.
+                router = inference_gate.router
+                assert router.fuzzy_model is True
+        """)
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+            inferencegate_fuzzy_model = true
+            inferencegate_fuzzy_sampling = aggressive
+        """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=2)
+
+    def test_custom_marker_overrides_individual_flags(self, pytester):
+        """
+        @pytest.mark.inferencegate(fuzzy_model=False) must flip only the
+        specified flag and leave others at session default.
+        """
+        pytester.makepyfile("""
+            import pytest
+
+            @pytest.mark.inferencegate(fuzzy_model=False)
+            def test_only_model_off(inference_gate):
+                router = inference_gate.router
+                assert router.fuzzy_model is False
+                # fuzzy_sampling not overridden — session default preserved
+                assert router.fuzzy_sampling == "aggressive"
+        """)
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+            inferencegate_fuzzy_model = true
+            inferencegate_fuzzy_sampling = aggressive
+        """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=1)
+
+    def test_overrides_are_restored_after_test(self, pytester):
+        """
+        Router flags must be restored to session defaults after a marked test
+        finishes, so subsequent unmarked tests see the original configuration.
+        """
+        pytester.makepyfile("""
+            import pytest
+
+            @pytest.mark.inferencegate_strict
+            def test_first_strict(inference_gate):
+                assert inference_gate.router.fuzzy_model is False
+
+            def test_second_unmarked(inference_gate):
+                # If restore worked, session default (true) is back.
+                assert inference_gate.router.fuzzy_model is True
+        """)
+        pytester.makeini(f"""
+            [pytest]
+            inferencegate_cache_dir = {CASSETTES_DIR}
+            inferencegate_fuzzy_model = true
+        """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=2)
+
+
 class TestPluginDisabling:
     """Tests that the plugin can be cleanly disabled."""
 
@@ -485,18 +573,17 @@ class TestHeaderSanitization:
         from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry
         secret = "Bearer sk-secret-key-12345"
         entry = CacheEntry(
-            request=CachedRequest(
-                method="POST", path="/v1/chat/completions", headers={
-                    "Content-Type": "application/json",
-                    "Authorization": secret,
-                    "Accept": "*/*",
-                }, body={
-                    "model": "test",
-                    "messages": [{
-                        "role": "user",
-                        "content": "hello"
-                    }]
-                }),
+            request=CachedRequest(method="POST", path="/v1/chat/completions", headers={
+                "Content-Type": "application/json",
+                "Authorization": secret,
+                "Accept": "*/*",
+            }, body={
+                "model": "test",
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
             response=CachedResponse(status_code=200, headers={"Content-Type": "application/json"}, body={"choices": []}),
         )
         cache_key = storage.put(entry)
