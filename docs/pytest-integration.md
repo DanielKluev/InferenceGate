@@ -123,6 +123,31 @@ def test_advanced(inference_gate):
     print(f"Server running at {inference_gate.base_url}")
 ```
 
+### `inference_gate_factory` (session-scoped)
+
+A factory fixture that creates `InferenceGate` instances with custom overrides. Useful for multi-model setups where you need to pass `model_routes` or other per-project configuration.
+
+The factory returns a callable `create(**overrides)` that:
+- Merges your overrides with the default session config (from CLI flags, env vars, ini options).
+- Starts the InferenceGate server in a background thread.
+- Returns the `InferenceGate` instance.
+- Cleans up all created servers at session teardown.
+
+```python
+from inference_gate.outflow.model_router import UpstreamConfig
+
+@pytest.fixture(scope="session")
+def inference_gate(inference_gate_factory):
+    """Project-level override: start a Gate with model-based routing."""
+    model_routes = {
+        "Gemma4:E4B-it-Q4_K_M": UpstreamConfig(url="http://127.0.0.1:8125"),
+        "Gemma-4-31B": UpstreamConfig(url="http://127.0.0.1:8000", api_key="vllm-key"),
+    }
+    return inference_gate_factory(model_routes=model_routes)
+```
+
+When called with no arguments, `inference_gate_factory()` behaves identically to the default `inference_gate` fixture.
+
 ---
 
 ## Markers
@@ -207,6 +232,58 @@ OPENAI_API_KEY=sk-... pytest --inferencegate-mode record
 git add tests/cassettes/
 git commit -m "Refresh inference cassettes"
 ```
+
+### Multi-Model Testing
+
+When your project tests multiple models served by different backends (e.g. a local llama.cpp server and a remote vLLM instance), use `model_routes` to route each model to the correct upstream during recording.
+
+**1. Define model routes in your project's `conftest.py`:**
+
+```python
+# tests/conftest.py
+import pytest
+from inference_gate.outflow.model_router import UpstreamConfig
+
+TEST_MODEL_LLAMACPP = "Gemma4:E4B-it-Q4_K_M"
+TEST_MODEL_VLLM = "Gemma-4-31B"
+
+@pytest.fixture(scope="session")
+def inference_gate(inference_gate_factory):
+    """Override the default Gate with multi-model routing."""
+    model_routes = {
+        TEST_MODEL_LLAMACPP: UpstreamConfig(url="http://127.0.0.1:8125"),
+        TEST_MODEL_VLLM: UpstreamConfig(url="http://127.0.0.1:8000", api_key="vllm-key"),
+    }
+    return inference_gate_factory(model_routes=model_routes)
+```
+
+**2. Write per-model tests:**
+
+```python
+def test_llamacpp_generation(inference_gate_url):
+    from openai import OpenAI
+    client = OpenAI(base_url=f"{inference_gate_url}/v1", api_key="unused")
+    resp = client.chat.completions.create(
+        model="Gemma4:E4B-it-Q4_K_M",
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+    assert resp.choices[0].message.content
+
+def test_vllm_generation(inference_gate_url):
+    from openai import OpenAI
+    client = OpenAI(base_url=f"{inference_gate_url}/v1", api_key="unused")
+    resp = client.chat.completions.create(
+        model="Gemma-4-31B",
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+    assert resp.choices[0].message.content
+```
+
+**3. Record:** Run `pytest --inferencegate-mode record` — each model's requests are forwarded to its configured upstream. All cassettes are stored in the same `tests/cassettes/` directory.
+
+**4. Replay:** Just `pytest` — InferenceGate matches cached responses by model name (or with `fuzzy_model` enabled, falls back across models).
+
+**Configuration file alternative:** Instead of hardcoding routes in `conftest.py`, you can define `model_routes` in a YAML config file (see [Configuration File Reference](configuration_file.md#model-based-upstream-routing)) and point to it with `--inferencegate-config`.
 
 ---
 
@@ -302,3 +379,19 @@ pytest -p no:inferencegate
 ```
 
 This cleanly removes all fixtures and CLI options. Useful if a project installs InferenceGate but some test runs don't need it.
+
+## Running under pytest-xdist
+
+The plugin is xdist-aware. When the controller starts, it spawns a single `inference-gate serve --print-url --parent-pid <pid>` subprocess and exports its URL via `INFERENCEGATE_URL` so all xdist workers share the same Gate.
+
+```bash
+pytest -n auto --dist loadscope
+```
+
+Use `--dist loadscope` so tests in the same module land on the same worker — this maximises cassette reuse.
+
+In record mode, concurrent writes from multiple workers are safe: Gate uses `asyncio.Lock` on the index, per-content-hash dedup locks, and atomic `os.replace` on tape/JSON/NDJSON writes.
+
+For cassette debugging, fall back to serial execution: `pytest -n 0`.
+
+

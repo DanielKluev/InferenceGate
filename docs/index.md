@@ -5,3 +5,4 @@
 * [docs/modules/index.md](modules/index.md) - Module-specific documentation index.
 * [docs/cli.md](cli.md) - Command-line interface (CLI) documentation.
 * [docs/pytest-integration.md](pytest-integration.md) - Pytest integration guide — using InferenceGate in your test suite.
+* [docs/headers.md](headers.md) - `X-InferenceGate-*` header contract: registered Require-/Metadata-/Control- headers consumed by the proxy.

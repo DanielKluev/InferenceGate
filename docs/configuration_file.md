@@ -38,7 +38,7 @@ The configuration file is a standard YAML file. All fields are optional — omit
 ```yaml
 host: 127.0.0.1
 port: 8080
-upstream: "http://10.100.3.38:8000/"
+upstream: "http://127.0.0.1:8000/"
 cache_dir: caches/my_project
 verbose: false
 proxy: "http://127.0.0.1:8888/"
@@ -71,6 +71,43 @@ api_key: "sk-..."
 | `api_key` | string | `null` | API key for upstream authentication. Sent as a `Bearer` token in the `Authorization` header. Falls back to the `OPENAI_API_KEY` environment variable if not set. **Note:** For security, this field is excluded when saving the config file via `config init`. |
 | `upstream_timeout` | float | `120.0` | Timeout in seconds for upstream API requests. If an upstream request takes longer than this, InferenceGate returns a `504 Gateway Timeout` to the client. Increase this for long-running inference tasks (e.g. large reasoning models). |
 | `proxy` | string | `null` | Optional HTTP proxy URL for routing upstream requests through a proxy server (e.g. `http://127.0.0.1:8888/`). When set, all outbound requests to the upstream AI endpoint are sent via the specified proxy. Useful for debugging with tools like mitmproxy or for network environments that require a proxy. |
+
+### Model-Based Upstream Routing
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model_routes` | dict | `{}` | Maps model names (or glob patterns) to per-model upstream configurations. When set and the server is in `record_and_replay` mode, each incoming request is dispatched to the upstream that matches its `model` field. Unmatched models fall back to the default `upstream`. |
+
+Each entry under `model_routes` is keyed by a model name or an `fnmatch`-style glob pattern and contains:
+
+| Sub-field | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | *(required)* | Base URL of the upstream API for this model. |
+| `api_key` | string | `null` | Optional API key for this upstream. |
+| `timeout` | float | `120.0` | Request timeout for this upstream. |
+| `proxy` | string | `null` | Optional HTTP proxy for this upstream. |
+
+**Resolution order:**
+1. Exact model name match.
+2. First `fnmatch` glob pattern match (e.g. `"Gemma4:*"`).
+3. Default `upstream` from the top-level config.
+
+#### Example
+
+```yaml
+upstream: "http://127.0.0.1:8000/"
+model_routes:
+  "Gemma4:E4B-it-Q4_K_M":
+    url: "http://127.0.0.1:8125"
+  "Gemma4:*":
+    url: "http://127.0.0.1:8125"
+    api_key: "my-local-key"
+  "Gemma-4-31B":
+    url: "http://127.0.0.1:8000"
+    api_key: "vllm-key"
+```
+
+In this example, requests for `Gemma4:E4B-it-Q4_K_M` go to `http://127.0.0.1:8125` (exact match); any other `Gemma4:*` model also goes there (glob match); `Gemma-4-31B` goes to the vLLM server; everything else falls back to the top-level `upstream`.
 
 ### Storage Settings
 
