@@ -257,6 +257,64 @@ class TestCacheStorage:
 
         assert key_with == key_without, "stream_options should be excluded from cache key"
 
+    def test_return_token_ids_changes_content_hash_but_not_prompt_hash(self):
+        """
+        Test that `return_token_ids` (vLLM extension) is deliberately part of `content_hash`.
+
+        `return_token_ids: true` and the absent/false setting must produce *different* content
+        hashes because the extension changes the response shape (adds `prompt_token_ids` /
+        `token_ids`).  The `prompt_hash` (model-fuzzy, messages-only) should still match across
+        the two so fuzzy lookup can find compatible cassettes when callers don't care about
+        token IDs.
+        """
+        messages = [{"role": "user", "content": "Hello"}]
+        body_without = {"model": "gpt-4", "messages": messages, "temperature": 0}
+        body_with = {"model": "gpt-4", "messages": messages, "temperature": 0, "return_token_ids": True}
+
+        content_without = compute_content_hash("POST", "/v1/chat/completions", body_without)
+        content_with = compute_content_hash("POST", "/v1/chat/completions", body_with)
+        prompt_without = compute_prompt_hash(body_without)
+        prompt_with = compute_prompt_hash(body_with)
+
+        assert content_without != content_with, "return_token_ids must distinguish content hashes"
+        assert prompt_without == prompt_with, "return_token_ids should not affect model-fuzzy prompt_hash"
+
+    def test_response_with_prompt_token_ids_round_trips_verbatim(self, storage):
+        """
+        Test that responses carrying `prompt_token_ids` (vLLM extension) survive put -> get.
+
+        The storage layer must not strip unknown response fields; `prompt_token_ids` enables
+        token-level correctness assertions in downstream tests (pyFADE Gemma4 correctness).
+        """
+        request = CachedRequest(
+            method="POST",
+            path="/v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "temperature": 0,
+                "return_token_ids": True,
+            },
+        )
+        prompt_token_ids = [1, 2, 3, 4, 5]
+        response = CachedResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body={
+                "choices": [{"message": {"content": "Hello!"}, "token_ids": [10, 11]}],
+                "prompt_token_ids": prompt_token_ids,
+            },
+        )
+        entry = CacheEntry(request=request, response=response, model="gpt-4", temperature=0)
+        storage.put(entry)
+
+        retrieved = storage.get(request)
+        assert retrieved is not None
+        assert retrieved.response.body is not None
+        assert retrieved.response.body.get("prompt_token_ids") == prompt_token_ids
+        assert retrieved.response.body["choices"][0].get("token_ids") == [10, 11]
+
     def test_text_completion_streaming_preserves_text(self, storage, temp_cache_dir):
         """Test that a streaming /v1/completions response reassembles with non-empty text.
 
@@ -816,6 +874,118 @@ class TestRawPromptSupport:
         sections = build_message_sections(body, "abc123")
         assert len(sections) == 1
         assert sections[0].body == "From messages"
+
+    def test_build_message_sections_token_id_prompt(self):
+        """
+        vLLM accepts pre-tokenized prompts on ``/v1/completions`` as ``list[int]``.
+
+        Verify the recording layer renders them into a non-empty USER section
+        instead of silently dropping the prompt (which produced empty tapes).
+        """
+        body = {"prompt": [105, 9731, 107, 98, 106], "model": "test"}
+        sections = build_message_sections(body, "abc123")
+        assert len(sections) == 1
+        assert sections[0].kind.value == "user"
+        assert "token_ids" in sections[0].body
+        assert "[105, 9731, 107, 98, 106]" in sections[0].body
+
+    def test_extract_first_user_message_token_id_prompt(self):
+        """Token-id prompts should still produce a non-empty TSV preview."""
+        body = {"prompt": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "model": "test"}
+        msg = extract_first_user_message(body)
+        assert msg.startswith("token_ids[10]:")
+        assert "1,2,3,4,5,6,7,8" in msg
+        assert msg.endswith("...")
+
+    def test_build_message_sections_assistant_tool_calls_and_tool_results(self):
+        """
+        Multi-turn tool-calling conversations must render the assistant's prior
+        ``tool_calls`` and the matching ``tool`` result messages as their own
+        tape sections.  Without this, two prompts that differ only in tool-call
+        history (the typical LLM-loop case) become byte-identical in the tape
+        body even though the underlying request bodies differ — making cassettes
+        unreadable for debugging and indistinguishable to a human reviewer.
+        """
+        body = {
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the weather?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_001",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_001", "name": "get_weather", "content": "22C sunny"},
+                {"role": "user", "content": "Thanks!"},
+            ]
+        }
+        sections = build_message_sections(body, "abc123")
+        kinds = [s.kind.value for s in sections]
+        # system, user, assistant_tool_call, tool_result, user
+        assert kinds == ["system", "user", "assistant_tool_call", "tool_result", "user"]
+        atc = sections[2]
+        assert atc.header == "assistant tool_call get_weather call_001"
+        assert atc.body == '{"city":"Paris"}'
+        assert atc.tool_name == "get_weather"
+        assert atc.tool_call_id == "call_001"
+        tr = sections[3]
+        assert tr.header == "tool call_001"
+        assert tr.metadata.get("Name") == "get_weather"
+        assert tr.body == "22C sunny"
+        assert tr.tool_call_id == "call_001"
+
+    def test_tape_round_trip_assistant_tool_call_and_tool_result(self):
+        """
+        Writer→parser round-trip preserves ``assistant tool_call`` and ``tool``
+        sections so replay-time consumers can reconstruct the prompt history.
+        """
+        from inference_gate.recording.models import SectionKind, TapeMetadata
+        from inference_gate.recording.tape_parser import parse_tape
+        from inference_gate.recording.tape_writer import write_tape
+
+        body = {
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "tc_42",
+                        "type": "function",
+                        "function": {"name": "ping", "arguments": '{"x":1}'},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "tc_42", "name": "ping", "content": "pong"},
+            ]
+        }
+        boundary = "deadbe"
+        sections = build_message_sections(body, boundary)
+        meta = TapeMetadata(boundary=boundary, model="test", endpoint="/v1/chat/completions")
+        tape_text = write_tape(meta, sections)
+        parsed_meta, parsed_sections = parse_tape(tape_text)
+        assert parsed_meta.boundary == boundary
+        kinds = [s.kind for s in parsed_sections]
+        assert SectionKind.ASSISTANT_TOOL_CALL in kinds
+        assert SectionKind.TOOL_RESULT in kinds
+        atc = next(s for s in parsed_sections if s.kind == SectionKind.ASSISTANT_TOOL_CALL)
+        assert atc.tool_name == "ping"
+        assert atc.tool_call_id == "tc_42"
+        assert atc.body == '{"x":1}'
+        tr = next(s for s in parsed_sections if s.kind == SectionKind.TOOL_RESULT)
+        assert tr.tool_call_id == "tc_42"
+        assert tr.metadata.get("Name") == "ping"
+        assert tr.body == "pong"
+
+    def test_generate_slug_token_id_prompt(self):
+        """Token-id prompts should produce a non-empty slug."""
+        body = {"prompt": [105, 9731, 107], "model": "test"}
+        slug = generate_slug(body)
+        assert slug != ""
+        assert "token-ids" in slug
 
     def test_put_and_get_raw_completions(self, storage):
         """Test that a raw /v1/completions request is stored with prompt in tape and index."""

@@ -1,0 +1,32 @@
+{
+  "content_hash": "d60c8e07905c",
+  "prompt_model_hash": "d60c8e07905c",
+  "prompt_hash": "8c81e05fef75a909",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "query_params": {},
+  "headers": {
+    "Host": "127.0.0.1:9714",
+    "Accept-Encoding": "identity",
+    "Content-Length": "138",
+    "Content-Type": "application/json",
+    "Connection": "keep-alive"
+  },
+  "body": {
+    "model": "openai/gpt-oss-120b",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is 2+2? Reply with only the number."
+      }
+    ],
+    "max_tokens": 200
+  },
+  "outcome": "hit",
+  "extra": {
+    "mode": "replay-only",
+    "fuzzy_model": false,
+    "fuzzy_sampling": "off",
+    "matched_content_hash": "d60c8e07905c"
+  }
+}

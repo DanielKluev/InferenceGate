@@ -27,6 +27,7 @@ CASSETTE_MODEL = "openai/gpt-oss-120b"
 # Prompts used when recording the production cassettes
 OK_PROMPT = 'This is a test prompt. Reply with **ONLY** "OK." to confirm that everything is ok. DO NOT output anything else.'
 MATH_PROMPT = "What is 2+2? Reply with only the number."
+CASSETTE_MAX_TOKENS = 200
 
 
 @pytest.fixture
@@ -63,7 +64,7 @@ class TestCassetteReplayNonStreaming:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
             },
         )
         assert resp.status == 200
@@ -84,7 +85,7 @@ class TestCassetteReplayNonStreaming:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
             },
         )
         data = await resp.json()
@@ -106,7 +107,7 @@ class TestCassetteReplayNonStreaming:
                     "role": "user",
                     "content": MATH_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
             },
         )
         assert resp.status == 200
@@ -129,7 +130,7 @@ class TestCassetteReplayStreaming:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
                 "stream": True,
             },
         )
@@ -153,7 +154,7 @@ class TestCassetteReplayStreaming:
                     "role": "user",
                     "content": MATH_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
                 "stream": True,
             },
         )
@@ -174,7 +175,7 @@ class TestCassetteReplayStreaming:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
                 "stream": True,
             },
         )
@@ -195,7 +196,7 @@ class TestCassetteReplayCacheMiss:
                     "role": "user",
                     "content": "This prompt is not in any cassette"
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
             },
         )
         assert resp.status == 503
@@ -213,7 +214,7 @@ class TestCassetteReplayCacheMiss:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
             },
         )
         assert resp.status == 503
@@ -232,7 +233,7 @@ class TestCassetteReplayCacheKeyNormalization:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
                 "stream": True,
             },
         )
@@ -248,7 +249,7 @@ class TestCassetteReplayCacheKeyNormalization:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
                 "stream": False,
             },
         )
@@ -264,7 +265,7 @@ class TestCassetteReplayCacheKeyNormalization:
                     "role": "user",
                     "content": OK_PROMPT
                 }],
-                "max_tokens": 50,
+                "max_tokens": CASSETTE_MAX_TOKENS,
                 "stream": True,
                 "stream_options": {
                     "include_usage": True

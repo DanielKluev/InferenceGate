@@ -1,0 +1,33 @@
+{
+  "content_hash": "3934735a5e90",
+  "prompt_model_hash": "3934735a5e90",
+  "prompt_hash": "9f472ba9ee184965",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "query_params": {},
+  "headers": {
+    "Host": "127.0.0.1:9842",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br",
+    "User-Agent": "Python/3.11 aiohttp/3.12.14",
+    "Content-Length": "132",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "model": "openai/gpt-oss-120b",
+    "messages": [
+      {
+        "role": "user",
+        "content": "This prompt is not in any cassette"
+      }
+    ],
+    "max_tokens": 200
+  },
+  "outcome": "miss",
+  "extra": {
+    "mode": "replay-only",
+    "fuzzy_model": false,
+    "fuzzy_sampling": "off",
+    "matched_content_hash": null
+  }
+}

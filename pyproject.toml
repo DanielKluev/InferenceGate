@@ -74,6 +74,14 @@ dedent_closing_brackets = false
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Default cassette directory for the in-tree `inference_gate_url` plugin
+# fixture.  Tests under `tests/tests_performance/` and `tests/tests_sample_app/`
+# rely on the bundled cassettes for replay-only assertions; non-cassette tests
+# simply ignore the loaded cache.
+inferencegate_cache_dir = "tests/cassettes"
+markers = [
+    "performance: throughput / latency assertions; deselect with '-m \"not performance\"'",
+]
 
 # -------------------------------------------------------------------
 [tool.mypy]

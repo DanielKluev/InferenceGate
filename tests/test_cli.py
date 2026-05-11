@@ -366,14 +366,16 @@ class TestTestUpstreamCommand:
 
     def test_test_upstream_no_api_key_error(self, runner, tmp_path):
         """
-        Test that test-upstream command fails with helpful error when no API key provided.
+        Test that test-upstream command fails with helpful error when no upstream/API key provided.
         """
-        # Use a temporary config file with no api_key to avoid picking up user's real config
+        # Use a temporary config file (config no longer carries upstream/api_key globally;
+        # caller must pass --upstream explicitly).
         config_path = tmp_path / "empty_config.yaml"
-        config_path.write_text("upstream: https://api.example.com\n")
+        config_path.write_text("port: 8080\n")
         result = runner.invoke(main, ["--config", str(config_path), "test-upstream"], env={"OPENAI_API_KEY": ""})
         assert result.exit_code == 1
-        assert "No API key provided" in result.output
+        # Either error is acceptable — we just want the command to refuse to run without upstream config.
+        assert ("No upstream URL provided" in result.output) or ("No API key provided" in result.output)
 
 
 class TestConfigCommands:
@@ -393,13 +395,12 @@ class TestConfigCommands:
 
     def test_config_show(self, runner):
         """
-        Test that config show displays current configuration.
+        Test that config show displays current configuration (new endpoints/models schema).
         """
         result = runner.invoke(main, ["config", "show"])
         assert result.exit_code == 0
         assert "host:" in result.output
         assert "port:" in result.output
-        assert "upstream:" in result.output
 
     def test_config_path(self, runner):
         """

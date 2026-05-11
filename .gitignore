@@ -219,3 +219,4 @@ configs/
 # Local transient documentation and planning files
 docs/planning/
 docs/sessions/
+howto.txt

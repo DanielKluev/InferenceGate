@@ -1,0 +1,33 @@
+{
+  "content_hash": "110c9ecbda95",
+  "prompt_model_hash": "110c9ecbda95",
+  "prompt_hash": "767a18b7152d15ef",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "query_params": {},
+  "headers": {
+    "Host": "127.0.0.1:9846",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br",
+    "User-Agent": "Python/3.11 aiohttp/3.12.14",
+    "Content-Length": "203",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "model": "gpt-4o-mini",
+    "messages": [
+      {
+        "role": "user",
+        "content": "This is a test prompt. Reply with **ONLY** \"OK.\" to confirm that everything is ok. DO NOT output anything else."
+      }
+    ],
+    "max_tokens": 200
+  },
+  "outcome": "miss",
+  "extra": {
+    "mode": "replay-only",
+    "fuzzy_model": false,
+    "fuzzy_sampling": "off",
+    "matched_content_hash": null
+  }
+}

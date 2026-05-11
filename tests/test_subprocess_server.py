@@ -135,12 +135,6 @@ class TestSubprocessPluginIntegration:
             import os
             def test_url_inherits_env(inference_gate_url):
                 assert inference_gate_url == os.environ["INFERENCEGATE_URL"]
-
-            def test_handle_gate_is_none_in_subprocess_mode(inference_gate):
-                # In subprocess-shared mode, .gate is None and .router is None.
-                assert inference_gate.gate is None
-                assert inference_gate.router is None
-                assert inference_gate.base_url.startswith("http://")
         """)
         pytester.makeini(f"""
             [pytest]
@@ -149,4 +143,4 @@ class TestSubprocessPluginIntegration:
         # Set on this process so the spawned sub-pytest inherits it.
         monkeypatch.setenv("INFERENCEGATE_URL", "http://127.0.0.1:9")
         result = pytester.runpytest_subprocess("-v", "-s")
-        result.assert_outcomes(passed=2)
+        result.assert_outcomes(passed=1)

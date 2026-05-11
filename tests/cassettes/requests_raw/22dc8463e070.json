@@ -1,0 +1,31 @@
+{
+  "content_hash": "22dc8463e070",
+  "prompt_model_hash": "22dc8463e070",
+  "prompt_hash": "767a18b7152d15ef",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "query_params": {},
+  "headers": {
+    "Host": "127.0.0.1:1999",
+    "Accept-Encoding": "identity",
+    "Content-Length": "219",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "model": "no-fuzzy-cli-override-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "This is a test prompt. Reply with **ONLY** \"OK.\" to confirm that everything is ok. DO NOT output anything else."
+      }
+    ],
+    "max_tokens": 200
+  },
+  "outcome": "miss",
+  "extra": {
+    "mode": "replay-only",
+    "fuzzy_model": false,
+    "fuzzy_sampling": "off",
+    "matched_content_hash": null
+  }
+}

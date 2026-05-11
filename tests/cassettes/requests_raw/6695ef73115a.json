@@ -1,0 +1,30 @@
+{
+  "content_hash": "6695ef73115a",
+  "prompt_model_hash": "6695ef73115a",
+  "prompt_hash": "31f67d3156c66274",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "query_params": {},
+  "headers": {
+    "Host": "127.0.0.1:1978",
+    "Accept-Encoding": "identity",
+    "Content-Length": "148",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "model": "missing-model-for-replay-503-test",
+    "messages": [
+      {
+        "role": "user",
+        "content": "This intentionally has no cassette: replay-503-sentinel"
+      }
+    ]
+  },
+  "outcome": "miss",
+  "extra": {
+    "mode": "replay-only",
+    "fuzzy_model": false,
+    "fuzzy_sampling": "off",
+    "matched_content_hash": null
+  }
+}
