@@ -114,9 +114,15 @@ class CacheStorage:
         self.requests_dir = self.cache_dir / "requests"
         self.responses_dir = self.cache_dir / "responses"
         self.assets_dir = self.cache_dir / "assets"
+        # ``requests_raw/`` is a debug-only mirror of every incoming request as JSON
+        # keyed by content_hash.  Unlike the human-readable ``.tape`` cassettes in
+        # ``requests/`` (which only exist post-record), this directory is written
+        # on EVERY request (replay or record) so a developer can correlate exactly
+        # what the upstream model received with the cassette miss/hit outcome.
+        self.requests_raw_dir = self.cache_dir / "requests_raw"
 
         # Create directory structure
-        for d in (self.cache_dir, self.requests_dir, self.responses_dir, self.assets_dir):
+        for d in (self.cache_dir, self.requests_dir, self.responses_dir, self.assets_dir, self.requests_raw_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         # Load or create the index
@@ -142,6 +148,56 @@ class CacheStorage:
             self.log.info("Rebuilding index to match current schema (migrated=%d)", migrated)
             self.index.rebuild(self.requests_dir)
             self.index._needs_rebuild = False
+
+    def dump_raw_request(self, *, method: str, path: str, headers: dict[str, str], body: dict[str, Any] | None,
+                          query_params: dict[str, str] | None, content_hash: str, prompt_model_hash: str | None = None,
+                          prompt_hash: str | None = None, outcome: str | None = None,
+                          extra: dict[str, Any] | None = None) -> Path | None:
+        """
+        Persist a verbatim JSON dump of an incoming request under
+        ``requests_raw/<content_hash>.json`` for debugging.
+
+        This is a write-once-per-content-hash debug mirror: when the file
+        already exists we skip rewriting it (the body is content-addressed
+        so identical requests produce identical files).  Sensitive headers
+        listed in :attr:`_SANITIZED_HEADERS` are dropped before persisting.
+
+        ``outcome`` is an optional label (``"hit"`` / ``"miss"`` / ``"forwarded"``)
+        and ``extra`` is a free-form dict for any per-request annotation
+        (engine routing decisions, fuzzy-match details, etc.).
+
+        Returns the resulting path on success, or ``None`` when the dump
+        could not be written (errors are swallowed and logged at WARNING
+        level — a debug aid must never break the live request path).
+        """
+        try:
+            target = self.requests_raw_dir / f"{content_hash}.json"
+            scrubbed_headers = {k: v for k, v in headers.items() if k.lower() not in self._SANITIZED_HEADERS}
+            payload: dict[str, Any] = {
+                "content_hash": content_hash,
+                "prompt_model_hash": prompt_model_hash,
+                "prompt_hash": prompt_hash,
+                "method": method,
+                "path": path,
+                "query_params": query_params or {},
+                "headers": scrubbed_headers,
+                "body": body,
+            }
+            if outcome is not None:
+                payload["outcome"] = outcome
+            if extra:
+                payload["extra"] = extra
+            # Atomic write: we don't want partial files on crash.  The file is
+            # rewritten in-place each call so the latest ``outcome`` / ``extra``
+            # for a given content_hash is preserved (handy when iterating in
+            # record mode).
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+            tmp.replace(target)
+            return target
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log.warning("Failed to dump raw request for content_hash=%s: %s", content_hash, exc)
+            return None
 
     def get(self, request: CachedRequest) -> CacheEntry | None:
         """

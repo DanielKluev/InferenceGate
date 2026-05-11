@@ -153,6 +153,24 @@ class Router:
         index_row = self._tiered_lookup(method, path, body, fuzzy_model=effective_fuzzy_model,
                                         fuzzy_sampling=effective_fuzzy_sampling, parsed=parsed)
 
+        # Debug mirror: write the verbatim incoming request to ``requests_raw/<hash>.json``
+        # regardless of mode or hit/miss.  This is the canonical artifact for "what did
+        # the model actually see" debugging — chat-template glitches, prompt assembly
+        # bugs, accidental tool-call leakage all surface in this directory.
+        try:
+            dbg_content_hash = compute_content_hash(method, path, body)
+            dbg_pm_hash = compute_prompt_model_hash(method, path, body)
+            dbg_p_hash = compute_prompt_hash(body)
+            outcome = "hit" if index_row is not None else "miss"
+            self.storage.dump_raw_request(method=method, path=path, headers=clean_headers, body=body,
+                                          query_params=query_params, content_hash=dbg_content_hash,
+                                          prompt_model_hash=dbg_pm_hash, prompt_hash=dbg_p_hash, outcome=outcome,
+                                          extra={"mode": effective_mode.value, "fuzzy_model": effective_fuzzy_model,
+                                                 "fuzzy_sampling": effective_fuzzy_sampling,
+                                                 "matched_content_hash": index_row.content_hash if index_row else None})
+        except Exception:  # pylint: disable=broad-except
+            self.log.exception("requests_raw dump failed; ignoring")
+
         if effective_mode == Mode.REPLAY_ONLY:
             return self._handle_replay_only(index_row, cached_request, strategy)
 

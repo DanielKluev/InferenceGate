@@ -49,6 +49,16 @@ SAMPLING_PARAM_NAMES: frozenset[str] = frozenset({
 })
 
 # Fields always excluded from ALL hash computations (non-deterministic or transport-level).
+#
+# Categorization rule: a request field is *excluded* from hashing only when it does NOT change
+# the response content (transport-only, e.g. `stream` toggles SSE vs JSON delivery of the same
+# payload).  Fields that change the response *shape* or *contents* MUST remain in the hash so
+# that a `true` and `false` setting produce distinct cassettes.
+#
+# Deliberately NOT excluded (and therefore part of `content_hash`):
+#   - `return_token_ids`   (vLLM extension; adds `prompt_token_ids` / `token_ids` to the response)
+#   - `prompt_logprobs`    (vLLM extension; adds per-prompt-token logprobs to the response)
+#   - `logprobs` / `top_logprobs` (OpenAI; alters response payload)
 ALWAYS_EXCLUDED_FIELDS: frozenset[str] = frozenset({
     "stream",
     "stream_options",
@@ -109,6 +119,8 @@ class SectionKind(str, Enum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT_PREFILL = "assistant_prefill"
+    ASSISTANT_TOOL_CALL = "assistant_tool_call"
+    TOOL_RESULT = "tool_result"
     USER_ATTACHMENT = "user_attachment"
     TOOLS = "tools"
     REPLY = "reply"

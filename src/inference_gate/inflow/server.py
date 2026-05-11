@@ -29,18 +29,22 @@ class InflowServer:
     to the `Router` for routing decisions (replay or forward upstream).
     """
 
-    def __init__(self, host: str, port: int, router: Router) -> None:
+    def __init__(self, host: str, port: int, router: Router, record_timeout: float = 600.0) -> None:
         """
         Initialize the inflow server.
 
         `host` is the address to bind to (e.g. "127.0.0.1").
         `port` is the port number to listen on.
         `router` is the Router instance that handles request routing.
+        `record_timeout` is the default upstream HTTP timeout (seconds) used
+        by the ``/gate/config`` admin handler when callers post a payload
+        that omits per-endpoint ``timeout`` fields.
         """
         self.log = logging.getLogger("InflowServer")
         self.host = host
         self.port = port
         self.router = router
+        self.record_timeout = record_timeout
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -58,7 +62,7 @@ class InflowServer:
         """
         app = web.Application()
         # Admin namespace first (also stashes router under app['router']).
-        register_admin_routes(app, self.router)
+        register_admin_routes(app, self.router, record_timeout=self.record_timeout)
         # Legacy health alias.
         app.router.add_route("GET", "/health", self._handle_health)
         # Catch-all route for proxying API requests.
@@ -118,6 +122,11 @@ class InflowServer:
         Parses the incoming request, extracts the client's streaming preference,
         delegates to the Router, and builds the appropriate HTTP response
         adapting the response format to match the client's original `stream` setting.
+
+        Holds a :class:`ConfigGate` request slot for the duration of routing
+        so that ``POST /gate/config`` cannot mutate ``router.outflow`` while
+        the request is being served.  New requests block during a config
+        update and proceed once the new config is in place.
         """
         method = request.method
         path = f"/{request.match_info['path']}"
@@ -143,11 +152,13 @@ class InflowServer:
         if request.query_string:
             query_params = dict(request.query)
 
-        # Route the request
+        # Route the request — gated to block during /gate/config rebuilds.
         self.log.debug("Received %s %s (client_streaming=%s)", method, path, client_wants_streaming)
+        config_gate = request.app["config_gate"]
         try:
-            cached_response = await self.router.route_request(method=method, path=path, headers=headers, body=body,
-                                                              query_params=query_params)
+            async with config_gate.request_slot():
+                cached_response = await self.router.route_request(method=method, path=path, headers=headers, body=body,
+                                                                  query_params=query_params)
         except HeaderValidationError as exc:
             # Malformed contract header — surface to the client as a structured 400 so SDKs can react.
             self.log.warning("Rejected request %s %s: invalid header %s", method, path, exc.offending_header)

@@ -21,11 +21,11 @@ import click
 
 from inference_gate.cli_format import (format_index_rows_json, format_index_rows_table, format_reply_human, format_reply_json,
                                        format_stats_human, format_stats_json, format_tape_detail_human, format_tape_detail_json)
-from inference_gate.config import Config, ConfigManager
+from inference_gate.config import Config, ConfigManager, EndpointDef, ModelRouteDef
 from inference_gate.inference_gate import InferenceGate
 from inference_gate.modes import Mode
 from inference_gate.outflow.client import OutflowClient
-from inference_gate.outflow.model_router import UpstreamConfig
+from inference_gate.outflow.model_router import EndpointConfig, ModelRoute
 from inference_gate.recording.hashing import compute_response_hash
 from inference_gate.recording.storage import CachedRequest, CachedResponse, CacheEntry, CacheStorage
 
@@ -57,21 +57,25 @@ def load_config(ctx: click.Context, config_path: str | None) -> Config:
     return config
 
 
-def _parse_model_routes(raw_routes: dict[str, dict[str, Any]], default_api_key: str | None = None, default_timeout: float = 120.0,
-                        default_proxy: str | None = None) -> dict[str, UpstreamConfig]:
+def _build_endpoints_and_models(config: Config) -> tuple[dict[str, EndpointConfig], list[ModelRoute]]:
     """
-    Convert raw YAML model_routes dicts into ``UpstreamConfig`` objects.
+    Convert YAML ``endpoints`` / ``models`` definitions into the runtime types
+    consumed by :class:`InferenceGate`.
 
-    Each entry in ``raw_routes`` maps a model name or glob pattern to a dict
-    with at least ``upstream`` (the URL).  Optional keys: ``api_key``,
-    ``timeout``, ``proxy``.  Missing optional keys fall back to the
-    provided defaults.
+    Per-endpoint ``timeout`` falls back to the top-level ``record_timeout``
+    when not set explicitly.  ``models`` preserves declaration order so glob
+    tie-breaking works as documented.
     """
-    result: dict[str, UpstreamConfig] = {}
-    for pattern, cfg in raw_routes.items():
-        result[pattern] = UpstreamConfig(url=cfg["upstream"], api_key=cfg.get("api_key", default_api_key),
-                                         timeout=cfg.get("timeout", default_timeout), proxy=cfg.get("proxy", default_proxy))
-    return result
+    endpoints: dict[str, EndpointConfig] = {}
+    for name, ep in config.endpoints.items():
+        endpoints[name] = EndpointConfig(
+            url=ep.url,
+            api_key=ep.api_key,
+            timeout=float(ep.timeout) if ep.timeout is not None else float(config.record_timeout),
+            proxy=ep.proxy,
+        )
+    routes: list[ModelRoute] = [ModelRoute(pattern=r.pattern, endpoint_name=r.endpoint, order=idx) for idx, r in enumerate(config.models)]
+    return endpoints, routes
 
 
 def get_config(ctx: click.Context) -> Config:
@@ -110,8 +114,6 @@ def main(ctx: click.Context, config_path: str | None) -> None:
 @click.option("--port", "-p", default=None, type=int, help="Port to run the server on (default: 8080)")
 @click.option("--host", "-h", default=None, help="Host to bind the server to (default: 127.0.0.1)")
 @click.option("--cache-dir", "-c", default=None, help="Directory to store cached responses (default: .inference_cache)")
-@click.option("--upstream", "-u", default=None, help="Upstream OpenAI API base URL (default: https://api.openai.com)")
-@click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (defaults to OPENAI_API_KEY env var)")
 @click.option("--web-ui", is_flag=True, default=False, help="Enable the web UI dashboard")
 @click.option("--web-ui-port", default=8081, type=int, help="Port for the web UI server (default: 8081)")
 @click.option("--fuzzy-model/--no-fuzzy-model", default=None,
@@ -120,21 +122,24 @@ def main(ctx: click.Context, config_path: str | None) -> None:
               help="Sampling parameter fuzzy matching: off (exact), soft (non-greedy matches non-greedy), aggressive (any match)")
 @click.option("--max-non-greedy-replies", default=None, type=int,
               help="Max replies to collect per non-greedy cassette before cycling (default: 5)")
-@click.option("--upstream-timeout", default=None, type=float,
-              help="Timeout in seconds for upstream API requests before returning 504 (default: 120.0)")
-@click.option("--proxy", default=None, help="HTTP proxy URL for upstream requests (e.g. http://127.0.0.1:8888/)")
+@click.option("--record-timeout", default=None, type=float,
+              help="Default upstream HTTP timeout in seconds (used when an endpoint does not set its own timeout). Default: 600.0")
 @click.option("--verbose", "-v", is_flag=True, default=None, help="Enable verbose logging")
 @click.pass_context
-def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, upstream: str | None, api_key: str | None,
-          web_ui: bool, web_ui_port: int, fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None,
-          upstream_timeout: float | None, proxy: str | None, verbose: bool | None) -> None:
+def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str | None, web_ui: bool, web_ui_port: int,
+          fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None, record_timeout: float | None,
+          verbose: bool | None) -> None:
     """
     Start in record-and-replay mode (default).
 
-    Replays cached inferences when available. On cache miss, forwards to upstream,
-    records the response, and stores it for future replays.
+    Replays cached inferences when available. On cache miss, dispatches the
+    request to the endpoint matched by the request's ``model`` field via the
+    configured routing table, records the response, and stores it for future
+    replays.
 
-    Command-line options override configuration file values.
+    Endpoints and the model→endpoint routing table are loaded from the YAML
+    config.  Use ``POST /gate/config`` at runtime to push live config from
+    test harnesses without restarting the server.
     """
     config = get_config(ctx)
 
@@ -142,33 +147,26 @@ def start(ctx: click.Context, port: int | None, host: str | None, cache_dir: str
     actual_port = port if port is not None else config.port
     actual_host = host if host is not None else config.host
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
-    actual_upstream = upstream if upstream is not None else config.upstream
-    actual_api_key = api_key if api_key is not None else config.api_key
     actual_verbose = verbose if verbose is not None else config.verbose
     actual_fuzzy_model = fuzzy_model if fuzzy_model is not None else config.fuzzy_model
     actual_fuzzy_sampling = fuzzy_sampling if fuzzy_sampling is not None else config.fuzzy_sampling
     actual_max_replies = max_non_greedy_replies if max_non_greedy_replies is not None else config.max_non_greedy_replies
-    actual_timeout = upstream_timeout if upstream_timeout is not None else config.upstream_timeout
-    actual_proxy = proxy if proxy is not None else config.proxy
-
-    # Convert model_routes from raw YAML dicts to UpstreamConfig objects
-    actual_model_routes = _parse_model_routes(config.model_routes, default_api_key=actual_api_key, default_timeout=actual_timeout,
-                                              default_proxy=actual_proxy) if config.model_routes else None
+    actual_record_timeout = record_timeout if record_timeout is not None else config.record_timeout
 
     setup_logging(actual_verbose)
 
+    endpoints, models = _build_endpoints_and_models(config)
     gate = InferenceGate(host=actual_host, port=actual_port, mode=Mode.RECORD_AND_REPLAY, cache_dir=actual_cache_dir,
-                         upstream_base_url=actual_upstream, api_key=actual_api_key, web_ui=web_ui, web_ui_port=web_ui_port,
-                         fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling, max_non_greedy_replies=actual_max_replies,
-                         upstream_timeout=actual_timeout, proxy=actual_proxy, model_routes=actual_model_routes)
+                         web_ui=web_ui, web_ui_port=web_ui_port, fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling,
+                         max_non_greedy_replies=actual_max_replies, record_timeout=actual_record_timeout, endpoints=endpoints,
+                         models=models)
 
     click.echo("Starting InferenceGate in record-and-replay mode")
     click.echo(f"  Proxy: http://{actual_host}:{actual_port}")
-    click.echo(f"  Upstream: {actual_upstream}")
+    click.echo(f"  Endpoints: {sorted(endpoints) if endpoints else '(none — push via /gate/config)'}")
+    click.echo(f"  Routes: {len(models)} entr{'y' if len(models) == 1 else 'ies'}")
     click.echo(f"  Cache dir: {actual_cache_dir}")
-    click.echo(f"  Upstream timeout: {actual_timeout}s")
-    if actual_proxy:
-        click.echo(f"  HTTP proxy: {actual_proxy}")
+    click.echo(f"  Record timeout: {actual_record_timeout}s")
     if actual_fuzzy_model:
         click.echo("  Fuzzy model matching: enabled")
     if actual_fuzzy_sampling != "off":
@@ -241,13 +239,13 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
 @click.option("--host", "-h", default="127.0.0.1", help="Host to bind the server to (default: 127.0.0.1).")
 @click.option("--port", "-p", default=0, type=int, help="Port to bind to. 0 = OS-assigned ephemeral (default: 0).")
 @click.option("--cache-dir", "-c", default=None, help="Directory for cached cassettes (default: from config).")
-@click.option("--upstream", "-u", default=None, help="Upstream API base URL (record mode only; default: from config).")
-@click.option("--api-key", "-k", envvar="OPENAI_API_KEY", default=None, help="API key for upstream (record mode only).")
 @click.option("--fuzzy-model/--no-fuzzy-model", default=None, help="Enable/disable fuzzy model matching.")
 @click.option("--fuzzy-sampling", default=None, type=click.Choice(["off", "soft", "aggressive"]),
               help="Sampling parameter fuzzy matching level.")
 @click.option("--max-non-greedy-replies", default=None, type=int, help="Max replies per non-greedy cassette before cycling.")
-@click.option("--proxy", default=None, help="HTTP proxy URL for upstream requests (record mode only).")
+@click.option("--record-timeout", default=None, type=float,
+              help="Default upstream HTTP timeout in seconds.  Falls back to config.record_timeout (default: 600.0).  "
+                   "Test harnesses should pass the same value as the pytest timeout so a slow recording does not silently abort.")
 @click.option("--print-url", is_flag=True, default=False,
               help="Print 'INFERENCEGATE_URL=http://...' on a single line after the server is ready, then continue running.  "
                    "Designed for parent processes that need to discover the OS-assigned port.")
@@ -256,9 +254,9 @@ def replay(ctx: click.Context, port: int | None, host: str | None, cache_dir: st
                    "Used by pytest-xdist controllers to ensure the subprocess Gate dies with the test session.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Enable verbose logging.")
 @click.pass_context
-def serve(ctx: click.Context, mode: str, host: str, port: int, cache_dir: str | None, upstream: str | None, api_key: str | None,
-          fuzzy_model: bool | None, fuzzy_sampling: str | None, max_non_greedy_replies: int | None, proxy: str | None,
-          print_url: bool, parent_pid: int | None, verbose: bool) -> None:
+def serve(ctx: click.Context, mode: str, host: str, port: int, cache_dir: str | None, fuzzy_model: bool | None,
+          fuzzy_sampling: str | None, max_non_greedy_replies: int | None, record_timeout: float | None, print_url: bool,
+          parent_pid: int | None, verbose: bool) -> None:
     """
     Start a long-running InferenceGate server suitable for use as a subprocess.
 
@@ -272,7 +270,9 @@ def serve(ctx: click.Context, mode: str, host: str, port: int, cache_dir: str | 
     3. ``--mode`` is a single flag so the same command line covers replay
        and record sessions.
 
-    All other options behave like ``start`` / ``replay``.
+    Endpoints and the model→endpoint routing table are loaded from the YAML
+    config; tests typically push them via ``POST /gate/config`` after the
+    server is up.
     """
     setup_logging(verbose)
 
@@ -281,21 +281,14 @@ def serve(ctx: click.Context, mode: str, host: str, port: int, cache_dir: str | 
     actual_fuzzy_model = fuzzy_model if fuzzy_model is not None else config.fuzzy_model
     actual_fuzzy_sampling = fuzzy_sampling if fuzzy_sampling is not None else config.fuzzy_sampling
     actual_max_replies = max_non_greedy_replies if max_non_greedy_replies is not None else config.max_non_greedy_replies
-    actual_upstream = upstream if upstream is not None else config.upstream
-    actual_api_key = api_key if api_key is not None else config.api_key
-    actual_timeout = config.upstream_timeout
-    actual_proxy = proxy if proxy is not None else config.proxy
-
-    # model_routes from config flow through transparently.
-    actual_model_routes = _parse_model_routes(config.model_routes, default_api_key=actual_api_key, default_timeout=actual_timeout,
-                                              default_proxy=actual_proxy) if config.model_routes else None
+    actual_record_timeout = record_timeout if record_timeout is not None else config.record_timeout
 
     gate_mode = Mode.RECORD_AND_REPLAY if mode == "record" else Mode.REPLAY_ONLY
+    endpoints, models = _build_endpoints_and_models(config) if gate_mode == Mode.RECORD_AND_REPLAY else ({}, [])
 
-    gate = InferenceGate(host=host, port=port, mode=gate_mode, cache_dir=actual_cache_dir, upstream_base_url=actual_upstream,
-                         api_key=actual_api_key, fuzzy_model=actual_fuzzy_model, fuzzy_sampling=actual_fuzzy_sampling,
-                         max_non_greedy_replies=actual_max_replies, upstream_timeout=actual_timeout, proxy=actual_proxy,
-                         model_routes=actual_model_routes)
+    gate = InferenceGate(host=host, port=port, mode=gate_mode, cache_dir=actual_cache_dir, fuzzy_model=actual_fuzzy_model,
+                         fuzzy_sampling=actual_fuzzy_sampling, max_non_greedy_replies=actual_max_replies,
+                         record_timeout=actual_record_timeout, endpoints=endpoints, models=models)
 
     asyncio.run(_run_serve(gate, print_url=print_url, parent_pid=parent_pid))
 
@@ -653,10 +646,13 @@ def cassette_fill(ctx: click.Context, cassette_id: str, count: int | None, cache
     config = get_config(ctx)
 
     actual_cache_dir = cache_dir if cache_dir is not None else config.cache_dir
-    actual_upstream = upstream if upstream is not None else config.upstream
-    actual_api_key = api_key if api_key is not None else config.api_key
-    actual_timeout = upstream_timeout if upstream_timeout is not None else config.upstream_timeout
-    actual_proxy = proxy if proxy is not None else config.proxy
+    # ``cassette fill`` calls the upstream directly (not through Gate); the user must supply
+    # connection details explicitly via flags or env vars.  No fallback to a single global
+    # ``config.upstream`` exists in the multi-endpoint schema.
+    actual_upstream = upstream
+    actual_api_key = api_key
+    actual_timeout = upstream_timeout if upstream_timeout is not None else config.record_timeout
+    actual_proxy = proxy
     actual_verbose = verbose if verbose is not None else config.verbose
     target_count = count if count is not None else config.max_non_greedy_replies
 
@@ -1062,17 +1058,22 @@ def test_upstream(ctx: click.Context, upstream: str | None, api_key: str | None,
     """
     config = get_config(ctx)
 
-    # Apply config defaults, command-line overrides
-    actual_upstream = upstream if upstream is not None else config.upstream
-    actual_api_key = api_key if api_key is not None else config.api_key
+    # Apply config defaults, command-line overrides.  ``test`` calls upstream directly,
+    # bypassing Gate; the user must supply connection details explicitly via flags or env vars.
+    actual_upstream = upstream
+    actual_api_key = api_key
     actual_model = model if model is not None else config.test_model
     actual_prompt = prompt if prompt is not None else config.test_prompt
     actual_verbose = verbose if verbose is not None else config.verbose
 
-    if not actual_api_key:
-        click.echo("Error: No API key provided. Set OPENAI_API_KEY environment variable, use --api-key, or configure in config file.",
-                   err=True)
+    if not actual_upstream:
+        click.echo("Error: No upstream URL provided.  Pass --upstream <URL> explicitly.", err=True)
         ctx.exit(1)
+        return
+    if not actual_api_key:
+        click.echo("Error: No API key provided. Set OPENAI_API_KEY environment variable or use --api-key.", err=True)
+        ctx.exit(1)
+        return
 
     url = f"{actual_upstream.rstrip('/')}/v1/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {actual_api_key}"}
@@ -1110,12 +1111,21 @@ def config_show(ctx: click.Context) -> None:
     click.echo("Current settings:")
     click.echo(f"  host: {cfg.host}")
     click.echo(f"  port: {cfg.port}")
-    click.echo(f"  upstream: {cfg.upstream}")
-    click.echo(f"  api_key: {'***' + cfg.api_key[-4:] if cfg.api_key and len(cfg.api_key) > 4 else '(not set)'}")
     click.echo(f"  cache_dir: {cfg.cache_dir}")
     click.echo(f"  verbose: {cfg.verbose}")
+    click.echo(f"  record_timeout: {cfg.record_timeout}")
+    click.echo(f"  fuzzy_model: {cfg.fuzzy_model}")
+    click.echo(f"  fuzzy_sampling: {cfg.fuzzy_sampling}")
     click.echo(f"  test_model: {cfg.test_model}")
     click.echo(f"  test_prompt: {cfg.test_prompt[:50]}..." if len(cfg.test_prompt) > 50 else f"  test_prompt: {cfg.test_prompt}")
+    # New endpoints/models routing schema.
+    click.echo(f"  endpoints: {len(cfg.endpoints)} configured")
+    for name, ep in cfg.endpoints.items():
+        masked = "***" if ep.api_key else "(none)"
+        click.echo(f"    - {name}: url={ep.url} api_key={masked} proxy={ep.proxy or '(none)'} timeout={ep.timeout}")
+    click.echo(f"  models: {len(cfg.models)} routes")
+    for route in cfg.models:
+        click.echo(f"    - pattern={route.pattern!r} -> endpoint={route.endpoint!r}")
 
 
 @config.command(name="init")

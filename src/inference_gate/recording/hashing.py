@@ -224,8 +224,17 @@ def _extract_prompt_text(body: dict[str, Any] | None) -> str:
 
     # Raw Completions API (pre-formatted prompt string)
     prompt = body.get("prompt")
-    if prompt and isinstance(prompt, str):
-        return prompt
+    if prompt:
+        if isinstance(prompt, str):
+            return prompt
+        # vLLM also accepts a pre-tokenized prompt as ``list[int]`` on
+        # ``/v1/completions``.  Render it as a compact human-readable token-id
+        # listing so the index TSV / slug carry *something* useful instead of
+        # being silently empty.
+        if isinstance(prompt, list) and all(isinstance(x, int) for x in prompt):
+            preview = ",".join(str(x) for x in prompt[:8])
+            suffix = "..." if len(prompt) > 8 else ""
+            return f"token_ids[{len(prompt)}]: {preview}{suffix}"
 
     return ""
 

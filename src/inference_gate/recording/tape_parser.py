@@ -252,7 +252,16 @@ def _parse_header(header: str) -> tuple[SectionKind, int | None, str | None, str
     elif role == "assistant":
         if len(parts) > 1 and parts[1].lower() == "prefill":
             return SectionKind.ASSISTANT_PREFILL, None, None, None
+        # "assistant tool_call <name> <id>" — prior tool call replayed from history.
+        if len(parts) >= 2 and parts[1].lower() == "tool_call":
+            tool_name = parts[2] if len(parts) > 2 else None
+            tool_call_id = parts[3] if len(parts) > 3 else None
+            return SectionKind.ASSISTANT_TOOL_CALL, None, tool_name, tool_call_id
         return SectionKind.UNKNOWN, None, None, None
+    elif role == "tool":
+        # "tool <id>" — tool result from a prior turn replayed in the prompt history.
+        tool_call_id = parts[1] if len(parts) > 1 else None
+        return SectionKind.TOOL_RESULT, None, None, tool_call_id
     elif role == "tools":
         return SectionKind.TOOLS, None, None, None
     elif role == "reply":

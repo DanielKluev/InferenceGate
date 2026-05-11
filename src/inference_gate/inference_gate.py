@@ -12,8 +12,7 @@ import logging
 
 from inference_gate.inflow.server import InflowServer
 from inference_gate.modes import Mode
-from inference_gate.outflow.client import OutflowClient
-from inference_gate.outflow.model_router import OutflowRouter, UpstreamConfig
+from inference_gate.outflow.model_router import EndpointConfig, ModelRoute, OutflowRouter
 from inference_gate.recording.storage import CacheStorage
 from inference_gate.router.router import Router
 
@@ -22,23 +21,28 @@ class InferenceGate:
     """
     Central orchestrator for the InferenceGate proxy system.
 
-    Creates and manages all components: InflowServer, Router, OutflowClient,
+    Creates and manages all components: InflowServer, Router, OutflowRouter,
     and CacheStorage. Handles startup and shutdown lifecycle.
+
+    All upstream connection details live inside the ``endpoints`` map
+    (Glue-style schema).  The ``models`` list is the routing table that
+    binds a model name (or glob pattern) to an endpoint, or to ``None``
+    (offline sentinel — model is registered but no live upstream is
+    available, replay-only).  When ``mode == RECORD_AND_REPLAY`` the
+    constructor builds a single :class:`OutflowRouter` from these inputs;
+    in ``REPLAY_ONLY`` mode no outflow is created.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8080, mode: Mode = Mode.RECORD_AND_REPLAY, cache_dir: str = ".inference_cache",
-                 upstream_base_url: str = "https://api.openai.com", api_key: str | None = None, web_ui: bool = False,
-                 web_ui_port: int = 8081, non_streaming_models: list[str] | None = None, fuzzy_model: bool = False,
-                 fuzzy_sampling: str = "off", max_non_greedy_replies: int = 5, upstream_timeout: float = 120.0, proxy: str | None = None,
-                 model_routes: dict[str, UpstreamConfig] | None = None) -> None:
+                 web_ui: bool = False, web_ui_port: int = 8081, non_streaming_models: list[str] | None = None, fuzzy_model: bool = False,
+                 fuzzy_sampling: str = "off", max_non_greedy_replies: int = 5, record_timeout: float = 600.0,
+                 endpoints: dict[str, EndpointConfig] | None = None, models: list[ModelRoute] | None = None) -> None:
         """
         Initialize InferenceGate with configuration.
 
         `host` and `port` configure the local proxy server address.
         `mode` determines behavior: record-and-replay or replay-only.
         `cache_dir` is the directory for storing cached inferences.
-        `upstream_base_url` is the real AI API endpoint URL.
-        `api_key` is the API key for upstream authentication.
         `web_ui` enables the optional web dashboard.
         `web_ui_port` is the port for the web UI server.
         `non_streaming_models` is a list of model names that do not support streaming.
@@ -46,35 +50,37 @@ class InferenceGate:
         but a different model when the exact cache key is not found.
         `fuzzy_sampling` controls sampling parameter fuzzy matching: "off", "soft", or "aggressive".
         `max_non_greedy_replies` is the max replies to collect per non-greedy cassette.
-        `upstream_timeout` is the timeout in seconds for upstream API requests.
-        `proxy` is an optional HTTP proxy URL for routing upstream requests
-        through a proxy server (e.g. ``"http://127.0.0.1:8888/"``).
-        `model_routes` maps model names (or glob patterns) to ``UpstreamConfig``
-        instances for multi-upstream recording.  When provided in
-        ``RECORD_AND_REPLAY`` mode, an ``OutflowRouter`` is created instead
-        of a plain ``OutflowClient``, and requests are dispatched to the
-        upstream whose model route matches the request's ``model`` field.
+        `record_timeout` is the default upstream HTTP timeout (seconds) used
+        when an endpoint config does not set its own ``timeout``.  It also
+        bounds how long ``forward_request`` may block during recording.
+        `endpoints` maps endpoint name → :class:`EndpointConfig`.  Endpoints
+        with the same ``(url, api_key, proxy)`` triple share a pooled
+        ``OutflowClient``.  Empty/None means no live endpoints are available
+        — only ``REPLAY_ONLY`` mode (or a record-mode config pushed via
+        ``POST /gate/config``) will work.
+        `models` is the ordered routing table.  Each :class:`ModelRoute`
+        binds a model name or glob to an endpoint name, or to ``None`` to
+        register an *offline* model (matched requests in record mode are
+        rejected with HTTP 503 ``model_offline``).
         """
         self.log = logging.getLogger("InferenceGate")
         self.host = host
         self.port = port
         self.mode = mode
         self.cache_dir = cache_dir
-        self.upstream_base_url = upstream_base_url
-        self.api_key = api_key
         self.web_ui = web_ui
         self.web_ui_port = web_ui_port
         self.non_streaming_models = non_streaming_models or []
         self.fuzzy_model = fuzzy_model
         self.fuzzy_sampling = fuzzy_sampling
         self.max_non_greedy_replies = max_non_greedy_replies
-        self.upstream_timeout = upstream_timeout
-        self.proxy = proxy
-        self.model_routes = model_routes
+        self.record_timeout = record_timeout
+        self.endpoints: dict[str, EndpointConfig] = dict(endpoints) if endpoints else {}
+        self.models: list[ModelRoute] = list(models) if models else []
 
         # Components (created during start)
         self._storage: CacheStorage | None = None
-        self._outflow: OutflowClient | OutflowRouter | None = None
+        self._outflow: OutflowRouter | None = None
         self._router: Router | None = None
         self._server: InflowServer | None = None
         self._webui_server: "WebUIServer | None" = None
@@ -83,34 +89,34 @@ class InferenceGate:
         """
         Create all system components based on configuration.
 
-        Creates CacheStorage, OutflowClient (if needed), Router, InflowServer, and optionally WebUIServer.
+        Creates CacheStorage, OutflowRouter (if needed), Router, InflowServer, and optionally WebUIServer.
         """
         self._storage = CacheStorage(self.cache_dir)
 
-        # OutflowClient/OutflowRouter is only needed for RECORD_AND_REPLAY mode
+        # OutflowRouter is only needed for RECORD_AND_REPLAY mode.  In replay
+        # mode we deliberately leave ``_outflow`` as ``None`` so a stray
+        # cache miss surfaces as a 503 from ``Router._handle_replay_only``
+        # rather than silently reaching upstream.
         if self.mode == Mode.RECORD_AND_REPLAY:
-            if self.model_routes:
-                # Multi-upstream: create an OutflowRouter that dispatches by model name
-                default_upstream = UpstreamConfig(url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout,
-                                                  proxy=self.proxy)
-                self._outflow = OutflowRouter(default_upstream=default_upstream, model_routes=self.model_routes)
-            else:
-                # Single-upstream: plain OutflowClient (backward compatible)
-                self._outflow = OutflowClient(upstream_base_url=self.upstream_base_url, api_key=self.api_key, timeout=self.upstream_timeout,
-                                              proxy=self.proxy)
+            self._outflow = OutflowRouter(endpoints=self.endpoints, routes=self.models)
         else:
             self._outflow = None
 
         self._router = Router(mode=self.mode, storage=self._storage, outflow=self._outflow, non_streaming_models=self.non_streaming_models,
                               fuzzy_model=self.fuzzy_model, fuzzy_sampling=self.fuzzy_sampling,
                               max_non_greedy_replies=self.max_non_greedy_replies)
-        self._server = InflowServer(host=self.host, port=self.port, router=self._router)
+        self._server = InflowServer(host=self.host, port=self.port, router=self._router, record_timeout=self.record_timeout)
 
         # WebUIServer is optional
         if self.web_ui:
             from inference_gate.webui.server import WebUIServer
-            # Only expose a non-None upstream_base_url to the WebUI when we actually have upstream access enabled.
-            webui_upstream_base_url = self.upstream_base_url if self.mode == Mode.RECORD_AND_REPLAY else None
+            # Only expose a non-None upstream_base_url to the WebUI when we actually have upstream access
+            # enabled.  With the new multi-endpoint schema we surface the *first* configured endpoint URL
+            # (or None when no live endpoints are configured) for display purposes; the WebUI does not need
+            # the full routing table.
+            webui_upstream_base_url: str | None = None
+            if self.mode == Mode.RECORD_AND_REPLAY and self.endpoints:
+                webui_upstream_base_url = next(iter(self.endpoints.values())).url
             # For security, always bind WebUI to localhost unless user explicitly configures a different host
             webui_host = "127.0.0.1"
             self._webui_server = WebUIServer(host=webui_host, port=self.web_ui_port, storage=self._storage, mode=self.mode,

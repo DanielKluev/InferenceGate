@@ -151,6 +151,55 @@ def build_message_sections(body: dict[str, Any] | None, boundary: str) -> list[T
                 text = _extract_text_content(content)
                 if text:
                     sections.append(TapeSection(kind=SectionKind.ASSISTANT_PREFILL, header="assistant prefill", body=text))
+                # Assistant messages can also carry prior tool_calls when replaying
+                # multi-turn tool-calling conversations.  Render each one as its own
+                # section so the tape faithfully reflects the request body the model
+                # is actually being shown — without this, two prompts that differ only
+                # in their tool-call history (the common LLM-loop case) become visually
+                # indistinguishable in the cassette.
+                tool_calls_in = msg.get("tool_calls")
+                if isinstance(tool_calls_in, list):
+                    import json
+                    for tc in tool_calls_in:
+                        if not isinstance(tc, dict):
+                            continue
+                        tc_id = str(tc.get("id") or "")
+                        fn = tc.get("function") or {}
+                        tc_name = str(fn.get("name") or "")
+                        args_text = fn.get("arguments") or ""
+                        # arguments is conventionally a JSON-encoded string at the
+                        # OpenAI wire level; pass it through verbatim so byte-level
+                        # equality between record-time and replay-time prompts holds.
+                        if not isinstance(args_text, str):
+                            args_text = json.dumps(args_text, separators=(",", ":"), ensure_ascii=False)
+                        header = f"assistant tool_call {tc_name} {tc_id}".rstrip()
+                        sections.append(
+                            TapeSection(
+                                kind=SectionKind.ASSISTANT_TOOL_CALL,
+                                header=header,
+                                body=args_text,
+                                tool_name=tc_name or None,
+                                tool_call_id=tc_id or None,
+                            ))
+            elif role == "tool":
+                # Tool result message — body is the tool's stringified output, with
+                # ``tool_call_id`` linking it back to the assistant's prior tool_call.
+                tc_id = str(msg.get("tool_call_id") or "")
+                tool_name = str(msg.get("name") or "")
+                text = _extract_text_content(content)
+                header = f"tool {tc_id}".rstrip()
+                section_metadata: dict[str, str] = {}
+                if tool_name:
+                    section_metadata["Name"] = tool_name
+                sections.append(
+                    TapeSection(
+                        kind=SectionKind.TOOL_RESULT,
+                        header=header,
+                        metadata=section_metadata,
+                        body=text,
+                        tool_name=tool_name or None,
+                        tool_call_id=tc_id or None,
+                    ))
 
     # Handle Responses API input
     input_data = body.get("input")
@@ -169,12 +218,42 @@ def build_message_sections(body: dict[str, Any] | None, boundary: str) -> list[T
 
     # Handle raw Completions API (pre-formatted prompt string from chat template).
     # The entire pre-formatted string is stored as a single user section.
+    # vLLM also accepts a pre-tokenized prompt as a list of integer token IDs;
+    # render that as a human-readable JSON array so the tape is never empty.
     if not messages and not input_data:
         prompt = body.get("prompt")
-        if prompt and isinstance(prompt, str):
-            sections.append(TapeSection(kind=SectionKind.USER, header="user", body=prompt))
+        rendered = _render_raw_prompt(prompt)
+        if rendered:
+            sections.append(TapeSection(kind=SectionKind.USER, header="user", body=rendered))
 
     return sections
+
+
+def _render_raw_prompt(prompt: Any) -> str:
+    """
+    Convert a raw Completions API ``prompt`` field to a human-readable string.
+
+    Supports the two shapes accepted by vLLM's ``/v1/completions`` endpoint:
+
+    - ``str``: returned verbatim.
+    - ``list[int]``: a pre-tokenized prompt — rendered as a JSON-style array
+      prefixed with a marker so consumers can tell it apart from a plain
+      string prompt without re-parsing.
+
+    Other shapes are stringified via :func:`repr` as a last-resort fallback so
+    the tape always has *some* recoverable representation of the request.
+    Returns an empty string when ``prompt`` is falsy.
+    """
+    if not prompt:
+        return ""
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list) and all(isinstance(x, int) for x in prompt):
+        # Pre-tokenized prompt — emit a marker line plus the JSON array.
+        import json
+        return f"<token_ids count={len(prompt)}>\n{json.dumps(prompt)}"
+    # Unknown shape — fall back to repr so the tape is never silently empty.
+    return repr(prompt)
 
 
 def build_reply_section(reply_info: ReplyInfo) -> list[TapeSection]:
