@@ -9,6 +9,7 @@ Provides JSON API endpoints for:
 """
 
 import logging
+import re
 from pathlib import Path
 
 from aiohttp import web
@@ -78,9 +79,19 @@ class WebUIAPI:
         if not entry_id:
             return web.json_response({"error": "Missing entry_id"}, status=400)
 
+        # Validate entry_id format to prevent path traversal
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", entry_id):
+            return web.json_response({"error": "Invalid entry_id format"}, status=400)
+
         try:
             # Load the cache entry directly by key instead of scanning all files
             cache_file = self.storage._get_cache_file(entry_id)
+
+            # Extra safety check: ensure the resolved path is within the cache directory
+            cache_dir = Path(self.cache_dir).resolve()
+            if not cache_file.resolve().is_relative_to(cache_dir):
+                return web.json_response({"error": "Invalid entry_id"}, status=400)
+
             if not cache_file.exists():
                 return web.json_response({"error": "Entry not found"}, status=404)
 
